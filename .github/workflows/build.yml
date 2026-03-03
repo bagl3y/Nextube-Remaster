@@ -1,0 +1,99 @@
+name: Build Nextube Firmware
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: espressif/idf:v4.4.7
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build firmware
+        shell: bash
+        run: |
+          . $IDF_PATH/export.sh
+          idf.py build
+          echo "Build complete"
+
+      - name: Prepare artifacts
+        run: |
+          mkdir -p artifacts
+          cp build/nextube-fw.bin           artifacts/
+          cp build/bootloader/bootloader.bin artifacts/
+          cp build/partition_table/partition-table.bin artifacts/
+          cp build/spiffs.bin               artifacts/
+          # Create combined flashable image
+          . $IDF_PATH/export.sh
+          esptool.py --chip esp32 merge_bin \
+            -o artifacts/nextube-fw-full.bin \
+            --flash_mode qio \
+            --flash_freq 80m \
+            --flash_size 16MB \
+            0x1000  build/bootloader/bootloader.bin \
+            0x8000  build/partition_table/partition-table.bin \
+            0x10000 build/nextube-fw.bin \
+            0x910000 build/spiffs.bin
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextube-firmware
+          path: artifacts/
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: nextube-firmware
+          path: artifacts/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            artifacts/nextube-fw.bin
+            artifacts/nextube-fw-full.bin
+            artifacts/bootloader.bin
+            artifacts/partition-table.bin
+            artifacts/spiffs.bin
+          body: |
+            ## Nextube Open-Source Firmware
+
+            ### Flash Instructions
+
+            **OTA (over-the-air):**
+            Upload `nextube-fw.bin` via the web UI at `http://nextube.local` → System → Firmware Update.
+
+            **Full flash via USB:**
+            ```bash
+            esptool.py --chip esp32 --port /dev/ttyUSB0 --baud 921600 \
+              write_flash 0x0 nextube-fw-full.bin
+            ```
+
+            **Individual partitions:**
+            ```bash
+            esptool.py --chip esp32 --port /dev/ttyUSB0 --baud 921600 \
+              write_flash \
+              0x1000   bootloader.bin \
+              0x8000   partition-table.bin \
+              0x10000  nextube-fw.bin \
+              0x910000 spiffs.bin
+            ```
+          draft: false
+          prerelease: false

@@ -1,0 +1,11 @@
+build/
+sdkconfig
+sdkconfig.old
+*.pyc
+__pycache__/
+.vscode/
+.idea/
+*.swp
+*.swo
+managed_components/
+dependencies.lock

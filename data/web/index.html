@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Nextube Manager</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{--bg:#1a1a2e;--card:#16213e;--accent:#0f3460;--hi:#e94560;--text:#eee;--dim:#999;--ok:#4ecca3}
+body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+header{background:var(--accent);padding:1rem 1.5rem;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:100;box-shadow:0 2px 8px rgba(0,0,0,.3)}
+header h1{font-size:1.2rem;font-weight:600;letter-spacing:.5px}
+header h1 span{color:var(--hi)}
+.status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+.status-dot.ok{background:var(--ok)}.status-dot.err{background:var(--hi)}
+nav{display:flex;gap:4px;background:var(--card);padding:4px;border-radius:8px;margin:1rem;flex-wrap:wrap}
+nav button{background:none;border:none;color:var(--dim);padding:.5rem 1rem;border-radius:6px;cursor:pointer;font-size:.85rem;transition:.2s}
+nav button.active{background:var(--accent);color:var(--text)}
+nav button:hover{color:var(--text)}
+main{padding:0 1rem 2rem}
+.card{background:var(--card);border-radius:10px;padding:1.2rem;margin-bottom:1rem}
+.card h2{font-size:1rem;margin-bottom:.8rem;color:var(--hi);border-bottom:1px solid rgba(255,255,255,.05);padding-bottom:.5rem}
+.field{margin-bottom:.8rem}
+.field label{display:block;font-size:.8rem;color:var(--dim);margin-bottom:4px}
+.field input,.field select{width:100%;padding:.5rem;border:1px solid rgba(255,255,255,.1);border-radius:6px;background:rgba(0,0,0,.2);color:var(--text);font-size:.9rem}
+.field input:focus,.field select:focus{outline:none;border-color:var(--hi)}
+.field input[type=range]{padding:0;height:6px;-webkit-appearance:none;background:rgba(255,255,255,.1);border:none;border-radius:3px}
+.field input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;height:16px;border-radius:50%;background:var(--hi);cursor:pointer}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:.8rem}
+.btn{display:inline-block;padding:.6rem 1.2rem;border:none;border-radius:6px;cursor:pointer;font-size:.85rem;font-weight:500;transition:.2s}
+.btn-primary{background:var(--hi);color:#fff}.btn-primary:hover{filter:brightness(1.15)}
+.btn-outline{background:none;border:1px solid var(--dim);color:var(--dim)}.btn-outline:hover{border-color:var(--text);color:var(--text)}
+.btn-danger{background:#c0392b;color:#fff}
+.btn-group{display:flex;gap:.5rem;flex-wrap:wrap;margin-top:.8rem}
+.meter{display:flex;align-items:center;gap:1rem}
+.meter span{min-width:3ch;text-align:right;font-variant-numeric:tabular-nums}
+.grid-3{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:.5rem}
+.color-swatch{width:40px;height:40px;border-radius:8px;border:2px solid rgba(255,255,255,.1);cursor:pointer}
+.toast{position:fixed;bottom:1rem;right:1rem;background:var(--ok);color:#000;padding:.6rem 1.2rem;border-radius:8px;font-size:.85rem;opacity:0;transform:translateY(10px);transition:.3s;z-index:200}
+.toast.show{opacity:1;transform:translateY(0)}
+.toast.err{background:var(--hi);color:#fff}
+.tab-content{display:none}.tab-content.active{display:block}
+.wifi-item{display:flex;justify-content:space-between;padding:.4rem 0;border-bottom:1px solid rgba(255,255,255,.05)}
+.wifi-item .ssid{font-weight:500}.wifi-item .rssi{color:var(--dim);font-size:.8rem}
+.progress{height:4px;background:rgba(255,255,255,.1);border-radius:2px;overflow:hidden;margin-top:.5rem}
+.progress-bar{height:100%;background:var(--hi);transition:width .3s}
+.stat{text-align:center;padding:.5rem}
+.stat .val{font-size:1.6rem;font-weight:700;color:var(--hi)}
+.stat .lbl{font-size:.75rem;color:var(--dim);margin-top:2px}
+</style>
+</head>
+<body>
+<header>
+  <h1>🕐 <span>Nextube</span> Manager</h1>
+  <div id="conn-status"><span class="status-dot err"></span>Connecting…</div>
+</header>
+
+<nav id="tabs">
+  <button class="active" data-tab="dashboard">Dashboard</button>
+  <button data-tab="display">Display</button>
+  <button data-tab="network">Network</button>
+  <button data-tab="services">Services</button>
+  <button data-tab="audio">Audio</button>
+  <button data-tab="system">System</button>
+</nav>
+
+<main>
+<!-- ─── Dashboard ──────────────────────────────────────────────── -->
+<div class="tab-content active" id="tab-dashboard">
+  <div class="card">
+    <div class="row" style="grid-template-columns:repeat(auto-fill,minmax(120px,1fr))">
+      <div class="stat"><div class="val" id="s-time">--:--</div><div class="lbl">Local Time</div></div>
+      <div class="stat"><div class="val" id="s-mode">--</div><div class="lbl">Mode</div></div>
+      <div class="stat"><div class="val" id="s-temp">--°</div><div class="lbl">Weather</div></div>
+      <div class="stat"><div class="val" id="s-subs">--</div><div class="lbl">Subscribers</div></div>
+      <div class="stat"><div class="val" id="s-heap">--</div><div class="lbl">Free Heap</div></div>
+      <div class="stat"><div class="val" id="s-wifi">--</div><div class="lbl">WiFi</div></div>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Quick Actions</h2>
+    <div class="btn-group">
+      <button class="btn btn-primary" onclick="setMode('Clock')">Clock</button>
+      <button class="btn btn-outline" onclick="setMode('Countdown')">Countdown</button>
+      <button class="btn btn-outline" onclick="setMode('Scoreboard')">Scoreboard</button>
+      <button class="btn btn-outline" onclick="setMode('Pomodoro')">Pomodoro</button>
+      <button class="btn btn-outline" onclick="setMode('YouTube')">YouTube</button>
+      <button class="btn btn-outline" onclick="setMode('Album')">Album</button>
+    </div>
+  </div>
+</div>
+
+<!-- ─── Display ────────────────────────────────────────────────── -->
+<div class="tab-content" id="tab-display">
+  <div class="card">
+    <h2>Display Settings</h2>
+    <div class="field"><label>Theme</label>
+      <select id="f-theme"><option>NixieOY</option><option>NixieGN</option><option>NixieBL</option><option>Digital</option><option>Flip</option></select>
+    </div>
+    <div class="field"><label>Time Format</label>
+      <select id="f-timetype"><option value="24H">24 Hour</option><option value="12H">12 Hour</option></select>
+    </div>
+    <div class="field meter"><label>LCD Brightness</label><input type="range" id="f-lcdbr" min="0" max="100"><span id="v-lcdbr">30</span>%</div>
+    <div class="field meter"><label>LED Brightness</label><input type="range" id="f-ledbr" min="0" max="100"><span id="v-ledbr">60</span>%</div>
+  </div>
+  <div class="card">
+    <h2>Backlight</h2>
+    <div class="field"><label>Mode</label>
+      <select id="f-blmode"><option>Static</option><option>Breath</option><option>Rainbow</option><option>Off</option></select>
+    </div>
+    <div class="field"><label>LED Colours (click to change)</label>
+      <div id="color-swatches" style="display:flex;gap:8px;flex-wrap:wrap"></div>
+    </div>
+  </div>
+  <div class="btn-group"><button class="btn btn-primary" onclick="saveSettings()">Save Display Settings</button></div>
+</div>
+
+<!-- ─── Network ────────────────────────────────────────────────── -->
+<div class="tab-content" id="tab-network">
+  <div class="card">
+    <h2>WiFi Configuration</h2>
+    <div class="field"><label>SSID</label><input id="f-ssid" type="text"></div>
+    <div class="field"><label>Password</label><input id="f-pass" type="password"></div>
+    <div class="btn-group">
+      <button class="btn btn-primary" onclick="saveSettings()">Save & Connect</button>
+      <button class="btn btn-outline" onclick="scanWifi()">Scan Networks</button>
+    </div>
+    <div id="wifi-list" style="margin-top:.8rem"></div>
+  </div>
+  <div class="card">
+    <h2>Time Zone</h2>
+    <div class="field"><label>UTC Offset (seconds, e.g. -21600 for UTC-6)</label>
+      <input id="f-tz" type="number">
+    </div>
+    <div class="field"><label>NTP Server</label><input id="f-ntp" type="text" value="pool.ntp.org"></div>
+    <div class="btn-group"><button class="btn btn-primary" onclick="saveSettings()">Save</button></div>
+  </div>
+</div>
+
+<!-- ─── Services ───────────────────────────────────────────────── -->
+<div class="tab-content" id="tab-services">
+  <div class="card">
+    <h2>Weather (OpenWeatherMap)</h2>
+    <div class="field"><label>API Key</label><input id="f-wkey" type="text"></div>
+    <div class="row">
+      <div class="field"><label>City</label><input id="f-city" type="text"></div>
+      <div class="field"><label>Units</label>
+        <select id="f-tempfmt"><option value="Celsius">Celsius</option><option value="Fahrenheit">Fahrenheit</option></select>
+      </div>
+    </div>
+  </div>
+  <div class="card">
+    <h2>YouTube / Bilibili</h2>
+    <div class="field"><label>Platform</label>
+      <select id="f-vsite"><option value="youtube">YouTube</option><option value="bilibili">Bilibili</option></select>
+    </div>
+    <div class="field"><label>YouTube Channel ID</label><input id="f-ytid" type="text"></div>
+    <div class="field"><label>YouTube API Key</label><input id="f-ytkey" type="text"></div>
+    <div class="field"><label>Bilibili UID</label><input id="f-buid" type="text"></div>
+  </div>
+  <div class="btn-group"><button class="btn btn-primary" onclick="saveSettings()">Save Services</button></div>
+</div>
+
+<!-- ─── Audio ──────────────────────────────────────────────────── -->
+<div class="tab-content" id="tab-audio">
+  <div class="card">
+    <h2>Audio Settings</h2>
+    <div class="field meter"><label>Volume</label><input type="range" id="f-vol" min="0" max="100"><span id="v-vol">20</span>%</div>
+    <div class="field"><label>Clock Music File</label><input id="f-music" type="text"></div>
+    <div class="field"><label>Bell Sound</label><input id="f-bell" type="text"></div>
+    <div class="field"><label>Timer Sound</label><input id="f-timer" type="text"></div>
+  </div>
+  <div class="btn-group"><button class="btn btn-primary" onclick="saveSettings()">Save Audio</button></div>
+</div>
+
+<!-- ─── System ─────────────────────────────────────────────────── -->
+<div class="tab-content" id="tab-system">
+  <div class="card">
+    <h2>Firmware Update (OTA)</h2>
+    <p style="color:var(--dim);font-size:.85rem;margin-bottom:.8rem">Upload a compiled .bin firmware file for over-the-air update.</p>
+    <input type="file" id="ota-file" accept=".bin" style="margin-bottom:.5rem">
+    <div class="progress" id="ota-progress" style="display:none"><div class="progress-bar" id="ota-bar"></div></div>
+    <div class="btn-group"><button class="btn btn-primary" onclick="doOTA()">Upload & Flash</button></div>
+  </div>
+  <div class="card">
+    <h2>SPIFFS Files</h2>
+    <div id="file-list" style="font-size:.85rem;max-height:300px;overflow-y:auto"></div>
+    <div class="btn-group"><button class="btn btn-outline" onclick="loadFiles()">Refresh</button></div>
+  </div>
+  <div class="card">
+    <h2>Danger Zone</h2>
+    <div class="btn-group">
+      <button class="btn btn-danger" onclick="if(confirm('Reset ALL settings to factory defaults?'))fetch('/api/reset',{method:'POST'}).then(()=>toast('Resetting...'))">Factory Reset</button>
+      <button class="btn btn-outline" onclick="fetch('/api/reset',{method:'POST'})">Reboot Device</button>
+    </div>
+  </div>
+  <div class="card">
+    <h2>About</h2>
+    <p style="font-size:.85rem;color:var(--dim)">Nextube Open-Source Firmware v<span id="s-fwver">1.0.0</span><br>
+    Hardware Rev <span id="s-hwver">1.31</span><br>
+    ESP32-WROVER-E · 16MB Flash · 8MB PSRAM<br>
+    <a href="https://github.com" style="color:var(--hi)">GitHub Repository</a></p>
+  </div>
+</div>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+let cfg = {};
+
+/* ── Toast ─────────────────────────────────────────── */
+function toast(msg, err) {
+  const t = $('toast'); t.textContent = msg;
+  t.className = 'toast show' + (err ? ' err' : '');
+  setTimeout(() => t.className = 'toast', 3000);
+}
+
+/* ── Tabs ──────────────────────────────────────────── */
+document.querySelectorAll('#tabs button').forEach(b => {
+  b.onclick = () => {
+    document.querySelectorAll('#tabs button').forEach(x => x.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    $('tab-' + b.dataset.tab).classList.add('active');
+  };
+});
+
+/* ── Range sliders ─────────────────────────────────── */
+['lcdbr','ledbr','vol'].forEach(id => {
+  const el = $('f-'+id);
+  if(el) el.oninput = () => $('v-'+id).textContent = el.value;
+});
+
+/* ── API helpers ───────────────────────────────────── */
+async function api(path, opts) {
+  try { const r = await fetch('/api/' + path, opts); return await r.json(); }
+  catch(e) { toast('API error: ' + e.message, true); return null; }
+}
+
+/* ── Load settings ─────────────────────────────────── */
+async function loadSettings() {
+  cfg = await api('settings');
+  if (!cfg) return;
+  const a = cfg.apps?.[0] || {};
+  $('f-theme').value = a.theme || 'NixieOY';
+  $('f-timetype').value = a.type || '24H';
+  $('f-lcdbr').value = cfg.lcd_brightness || 30; $('v-lcdbr').textContent = cfg.lcd_brightness || 30;
+  $('f-ledbr').value = cfg.led_brightness || 60; $('v-ledbr').textContent = cfg.led_brightness || 60;
+  $('f-blmode').value = cfg.backlight_mode || 'Breath';
+  $('f-ssid').value = cfg.ssid || '';
+  $('f-pass').value = cfg.password || '';
+  $('f-tz').value = cfg.time_zone || -21600;
+  $('f-wkey').value = cfg.weather_api_key || '';
+  $('f-city').value = cfg.City || '';
+  $('f-tempfmt').value = cfg.temperature_formate || 'Celsius';
+  $('f-vsite').value = cfg.video_site || 'youtube';
+  $('f-ytid').value = cfg.youtube_id || '';
+  $('f-ytkey').value = cfg.youtube_key || '';
+  $('f-buid').value = cfg.bili_uid || '';
+  $('f-vol').value = cfg.volume || 20; $('v-vol').textContent = cfg.volume || 20;
+  $('f-music').value = cfg.music_file || '';
+  $('f-bell').value = cfg.bell_file || '';
+  $('f-timer').value = cfg.timer_file || '';
+
+  /* Colour swatches */
+  const sw = $('color-swatches'); sw.innerHTML = '';
+  (cfg.backlight_RGB || []).forEach((c,i) => {
+    const d = document.createElement('input');
+    d.type = 'color'; d.className = 'color-swatch';
+    d.value = '#' + c.map(v => v.toString(16).padStart(2,'0')).join('');
+    d.dataset.idx = i;
+    sw.appendChild(d);
+  });
+}
+
+/* ── Save settings ─────────────────────────────────── */
+async function saveSettings() {
+  const colors = [...document.querySelectorAll('#color-swatches input')].map(el => {
+    const h = el.value.replace('#','');
+    return [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)];
+  });
+  const body = {
+    apps: [{ name:'app1', app: cfg.apps?.[0]?.app || 'Clock', theme: $('f-theme').value, type: $('f-timetype').value }],
+    lcd_brightness: +$('f-lcdbr').value, led_brightness: +$('f-ledbr').value,
+    backlight_mode: $('f-blmode').value, backlight_onoff: $('f-blmode').value === 'Off' ? 'OFF' : 'ON',
+    backlight_RGB: colors.length ? colors : cfg.backlight_RGB,
+    ssid: $('f-ssid').value, password: $('f-pass').value,
+    time_zone: +$('f-tz').value,
+    weather_api_key: $('f-wkey').value, City: $('f-city').value, temperature_formate: $('f-tempfmt').value,
+    video_site: $('f-vsite').value, youtube_id: $('f-ytid').value, youtube_key: $('f-ytkey').value, bili_uid: $('f-buid').value,
+    volume: +$('f-vol').value, music_file: $('f-music').value, bell_file: $('f-bell').value, timer_file: $('f-timer').value,
+  };
+  const res = await api('settings', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  toast(res?.status === 'ok' ? 'Settings saved!' : 'Save failed', res?.status !== 'ok');
+}
+
+/* ── Set mode ──────────────────────────────────────── */
+async function setMode(mode) {
+  cfg.apps = [{ name:'app1', app: mode, theme: $('f-theme')?.value || 'NixieOY', type: $('f-timetype')?.value || '24H' }];
+  const body = { apps: cfg.apps };
+  const res = await api('settings', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  toast(res?.status === 'ok' ? 'Mode: ' + mode : 'Failed', res?.status !== 'ok');
+  refreshStatus();
+}
+
+/* ── WiFi scan ─────────────────────────────────────── */
+async function scanWifi() {
+  await api('wifi/scan', { method:'POST' });
+  toast('Scanning...');
+  setTimeout(async () => {
+    const nets = await api('wifi/scan');
+    if (!nets) return;
+    $('wifi-list').innerHTML = nets.map(n =>
+      `<div class="wifi-item" onclick="$('f-ssid').value='${n.ssid}'">
+        <span class="ssid">${n.ssid}</span><span class="rssi">${n.rssi} dBm</span>
+      </div>`
+    ).join('');
+  }, 3000);
+}
+
+/* ── OTA ───────────────────────────────────────────── */
+async function doOTA() {
+  const file = $('ota-file').files[0];
+  if (!file) return toast('Select a .bin file first', true);
+  $('ota-progress').style.display = 'block';
+  const xhr = new XMLHttpRequest();
+  xhr.upload.onprogress = e => { if(e.lengthComputable) $('ota-bar').style.width = (e.loaded/e.total*100)+'%'; };
+  xhr.onload = () => { toast('OTA complete! Rebooting...'); setTimeout(() => location.reload(), 15000); };
+  xhr.onerror = () => toast('OTA failed', true);
+  xhr.open('POST', '/api/update_firmware');
+  xhr.send(file);
+}
+
+/* ── File list ─────────────────────────────────────── */
+async function loadFiles() {
+  const files = await api('file/ls?dir=/');
+  if (!files) return;
+  $('file-list').innerHTML = files.map(f =>
+    `<div style="display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid rgba(255,255,255,.05)">
+      <span>${f.name}</span><span style="color:var(--dim)">${f.size ? (f.size/1024).toFixed(1)+'K' : 'dir'}</span>
+    </div>`
+  ).join('') || '<em style="color:var(--dim)">No files</em>';
+}
+
+/* ── Status polling ────────────────────────────────── */
+async function refreshStatus() {
+  const s = await api('status');
+  if (!s) {
+    $('conn-status').innerHTML = '<span class="status-dot err"></span>Offline';
+    return;
+  }
+  $('conn-status').innerHTML = '<span class="status-dot ok"></span>Connected';
+  $('s-time').textContent = s.time ? s.time.split('T')[1] : '--:--';
+  $('s-mode').textContent = s.mode || '--';
+  $('s-temp').textContent = s.weather ? s.weather.temp_c.toFixed(1) + '°C' : '--°';
+  $('s-subs').textContent = s.subscribers != null ? s.subscribers.toLocaleString() : '--';
+  $('s-heap').textContent = s.heap_free ? (s.heap_free/1024).toFixed(0) + 'K' : '--';
+  $('s-wifi').textContent = s.wifi_connected ? s.ip : 'No WiFi';
+  $('s-fwver').textContent = s.firmware || '--';
+}
+
+/* ── Init ──────────────────────────────────────────── */
+loadSettings();
+refreshStatus();
+setInterval(refreshStatus, 5000);
+</script>
+</body>
+</html>
