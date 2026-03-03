@@ -4,7 +4,7 @@ set(EXTRA_COMPONENT_DIRS "components")
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
+project(nextube-fw)
+
 # Embed the SPIFFS web filesystem into the firmware
 spiffs_create_partition_image(spiffs data FLASH_IN_PROJECT)
-
-project(nextube-fw)
