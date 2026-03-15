@@ -48,7 +48,6 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
 
 static void start_mdns(void)
 {
-    const nextube_config_t *cfg = config_get();
     mdns_init();
     mdns_hostname_set("nextube-remaster");
     mdns_instance_name_set("Nextube Remaster");
