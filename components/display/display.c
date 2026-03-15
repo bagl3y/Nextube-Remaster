@@ -52,7 +52,7 @@ static void st7735_init_one(int tube)
     lcd_cmd(0x01); vTaskDelay(pdMS_TO_TICKS(150)); /* SWRESET */
     lcd_cmd(0x11); vTaskDelay(pdMS_TO_TICKS(120)); /* SLPOUT  */
     lcd_cmd(0x3A); lcd_data_byte(0x05);            /* COLMOD  RGB565 */
-    lcd_cmd(0x36); lcd_data_byte(0x08);            /* MADCTL  BGR */
+    lcd_cmd(0x36); lcd_data_byte(0xC8);            /* MADCTL  MY|MX|BGR = 180° rotation */
     uint8_t fr[] = {0x01, 0x2C, 0x2D};
     lcd_cmd(0xB1); lcd_data(fr, 3);                /* FRMCTR1 */
     lcd_cmd(0x29); vTaskDelay(pdMS_TO_TICKS(50));  /* DISPON  */
