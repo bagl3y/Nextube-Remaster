@@ -6,6 +6,7 @@
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "weather.h"
 #include <string.h>
 #include <stdint.h>
 
@@ -437,6 +438,59 @@ static void render_album(const nextube_config_t *cfg,
     }
 }
 
+/* ── Weather mode ───────────────────────────────────────────────────── */
+/*
+ * Layout: [TT][TT][unit][HH][HH][icon]
+ *   tubes 0-1 : temperature integer (absolute value, 00-99)
+ *   tube  2   : unit icon  (°C or °F)  from MutiInfo/Temperature/{c|f}.jpg
+ *   tubes 3-4 : humidity integer (00-99)
+ *   tube  5   : weather condition icon from MutiInfo/Weather/{icon}.jpg
+ */
+static void render_weather(const nextube_config_t *cfg)
+{
+    const weather_data_t *w = weather_get();
+    char path[128];
+
+    if (!w || !w->valid) {
+        for (int i = 0; i < LCD_COUNT; i++) display_fill(i, 0x0000);
+        return;
+    }
+
+    /* Temperature in the configured unit */
+    float temp_f = strncmp(cfg->temp_format, "Fahrenheit", 10) == 0
+                       ? w->temp_c * 9.0f / 5.0f + 32.0f
+                       : w->temp_c;
+    int temp = (int)(temp_f < 0.0f ? temp_f - 0.5f : temp_f + 0.5f);
+    if (temp < 0) temp = -temp;   /* show absolute value – no minus glyph in themes */
+    if (temp > 99) temp = 99;
+
+    int hum = (int)(w->humidity + 0.5f);
+    if (hum < 0)  hum = 0;
+    if (hum > 99) hum = 99;
+
+    /* Tube 0-1: temperature digits */
+    display_path_number(path, sizeof(path), cfg->theme, temp / 10);
+    display_show_image(0, path);
+    display_path_number(path, sizeof(path), cfg->theme, temp % 10);
+    display_show_image(1, path);
+
+    /* Tube 2: °C / °F unit */
+    const char *unit = (strncmp(cfg->temp_format, "Fahrenheit", 10) == 0) ? "f" : "c";
+    display_path_temperature(path, sizeof(path), cfg->theme, unit);
+    display_show_image(2, path);
+
+    /* Tube 3-4: humidity digits */
+    display_path_number(path, sizeof(path), cfg->theme, hum / 10);
+    display_show_image(3, path);
+    display_path_number(path, sizeof(path), cfg->theme, hum % 10);
+    display_show_image(4, path);
+
+    /* Tube 5: weather condition icon */
+    const char *icon = (w->icon[0] != '\0') ? w->icon : "sunny";
+    display_path_weather(path, sizeof(path), cfg->theme, icon);
+    display_show_image(5, path);
+}
+
 /* ── Timer state ────────────────────────────────────────────────────── */
 static TickType_t s_timer_start   = 0;
 static bool       s_pomo_in_break = false;
@@ -462,6 +516,10 @@ static void display_task(void *arg)
     char          last_theme[32] = {0};
     uint32_t      last_subs    = UINT32_MAX;
     int32_t       last_remain_s = INT32_MAX;  /* countdown/pomodoro change detection */
+    float         last_temp_c  = -9999.0f;    /* weather change detection */
+    float         last_hum     = -1.0f;
+    bool          last_bl_on   = true;        /* backlight on/off tracking */
+    uint8_t       last_bl_brt  = 255;         /* sentinel: force-apply on first tick */
     TickType_t    album_switch = 0;
     bool          first        = true;
 
@@ -478,6 +536,16 @@ static void display_task(void *arg)
             s_album_loaded = false; s_album_index = 0; album_switch = 0;
             last_remain_s  = INT32_MAX;
             display_timer_reset();
+        }
+
+        /* Apply backlight on/off whenever the config changes.
+         * This is the only place that translates cfg->backlight_on into
+         * an actual LEDC duty cycle, so the middle touch button works. */
+        if (first || cfg->backlight_on != last_bl_on ||
+                     cfg->lcd_brightness != last_bl_brt) {
+            display_set_brightness(cfg->backlight_on ? cfg->lcd_brightness : 0);
+            last_bl_on  = cfg->backlight_on;
+            last_bl_brt = cfg->lcd_brightness;
         }
 
         switch (mode) {
@@ -553,6 +621,17 @@ static void display_task(void *arg)
         case APP_MODE_ALBUM:
             render_album(cfg, &album_switch, first || mode_changed || theme_changed);
             break;
+
+        case APP_MODE_WEATHER: {
+            const weather_data_t *w = weather_get();
+            bool wx_changed = w && w->valid &&
+                              (w->temp_c != last_temp_c || w->humidity != last_hum);
+            if (first || mode_changed || theme_changed || wx_changed) {
+                render_weather(cfg);
+                if (w && w->valid) { last_temp_c = w->temp_c; last_hum = w->humidity; }
+            }
+            break;
+        }
 
         default: break;
         }

@@ -281,7 +281,14 @@ void audio_init(void)
     /* Start in oneshot mode so we can set an idle DC level (silence) */
     dac_oneshot_config_t one_cfg = { .chan_id = DAC_CHAN_0 };
     ESP_ERROR_CHECK(dac_oneshot_new_channel(&one_cfg, &s_dac_one));
-    dac_oneshot_output_voltage(s_dac_one, 128);   /* mid-rail = silence */
+    /* Ramp 0 → 128 over ~32 ms to suppress the LTK8002D power-on pop.
+     * A hard step from the DAC's undefined power-on state to mid-rail
+     * is amplified and audible as a click; a slow ramp is inaudible. */
+    for (int v = 0; v <= 128; v += 4) {
+        dac_oneshot_output_voltage(s_dac_one, (uint8_t)v);
+        vTaskDelay(1);   /* 1 tick ≈ 1 ms → 32 steps × 1 ms ≈ 32 ms total */
+    }
+    dac_oneshot_output_voltage(s_dac_one, 128);   /* settle at mid-rail = silence */
 
     s_play_mutex = xSemaphoreCreateMutex();
 }

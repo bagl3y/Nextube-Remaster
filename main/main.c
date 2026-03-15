@@ -46,7 +46,7 @@ static void on_touch(touch_pad_id_t pad)
 {
     const nextube_config_t *cfg = config_get();
     static const char *mode_names[] = {
-        "Clock","Countdown","Scoreboard","Pomodoro","YouTube","CustomClock","Album"
+        "Clock","Countdown","Scoreboard","Pomodoro","YouTube","CustomClock","Album","Weather"
     };
     char json[80];
 
@@ -119,10 +119,19 @@ static void init_nvs(void)
 /* ── Application entry ─────────────────────────────────────────────── */
 void app_main(void)
 {
+#ifndef FW_VERSION_STR
+#define FW_VERSION_STR "0.0.0"
+#endif
     ESP_LOGI(TAG, "╔════════════════════════════════════════════════╗");
-    ESP_LOGI(TAG, "║  Nextube Open-Source Firmware v1.0             ║");
+    ESP_LOGI(TAG, "║  Nextube Open-Source Firmware v%-16s ║", FW_VERSION_STR);
     ESP_LOGI(TAG, "║  https://github.com/MrToast99/Nextube-Remaster ║");
     ESP_LOGI(TAG, "╚════════════════════════════════════════════════╝");
+
+    /* Allow power rails and SPI peripherals to fully settle.
+     * After a full-flash via esptool, the SPI bus can be in an indeterminate
+     * state after the software reset; this pause ensures display_init()'s
+     * RST pulse starts from a clean state and avoids needing a power cycle. */
+    vTaskDelay(pdMS_TO_TICKS(500));
 
     /* Core initialisations */
     init_nvs();

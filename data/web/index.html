@@ -86,6 +86,7 @@ main{padding:0 1rem 2rem}
       <button class="btn btn-outline" onclick="setMode('Pomodoro')">Pomodoro</button>
       <button class="btn btn-outline" onclick="setMode('YouTube')">YouTube</button>
       <button class="btn btn-outline" onclick="setMode('Album')">Album</button>
+      <button class="btn btn-outline" onclick="setMode('Weather')">Weather</button>
     </div>
   </div>
 </div>
@@ -138,8 +139,9 @@ main{padding:0 1rem 2rem}
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-scoreboard"> Scoreboard</label>
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-pomodoro"> Pomodoro</label>
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-youtube"> YouTube</label>
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-customclock"> Custom Clock</label>
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-album"> Album</label>
-      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-bilibili"> Bilibili</label>
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-weather"> Weather</label>
     </div>
   </div>
   <div class="btn-group"><button class="btn btn-primary" onclick="saveSettings()">Save Display Settings</button></div>
@@ -174,6 +176,8 @@ main{padding:0 1rem 2rem}
     <div class="field"><label>Source</label>
       <select id="f-wsrc" onchange="toggleWeatherKey()">
         <option value="wttr">wttr.in – free, no key needed</option>
+        <option value="openmeteo">Open-Meteo – free, no key needed</option>
+        <option value="metno">Met.no – free, no key needed</option>
         <option value="openweather">OpenWeatherMap – free API key required</option>
       </select>
     </div>
@@ -256,6 +260,7 @@ function toast(msg, err) {
 /* ── Weather source toggle ─────────────────────────── */
 function toggleWeatherKey() {
   const src = $('f-wsrc') ? $('f-wsrc').value : 'wttr';
+  /* Only OpenWeatherMap needs an API key; wttr.in and Open-Meteo are keyless */
   $('f-wkey-row').style.display = (src === 'openweather') ? '' : 'none';
 }
 
@@ -308,13 +313,14 @@ async function loadSettings() {
   $('f-timer').value = cfg.timer_file || '';
 
   /* Enabled modes bitmask */
-  const em = cfg.enabled_modes !== undefined ? cfg.enabled_modes : 0x7F;
-  $('m-countdown').checked  = !!(em & (1 << 1));
-  $('m-scoreboard').checked = !!(em & (1 << 2));
-  $('m-pomodoro').checked   = !!(em & (1 << 3));
-  $('m-youtube').checked    = !!(em & (1 << 4));
-  $('m-album').checked      = !!(em & (1 << 5));
-  $('m-bilibili').checked   = !!(em & (1 << 6));
+  const em = cfg.enabled_modes !== undefined ? cfg.enabled_modes : 0xFF;
+  $('m-countdown').checked   = !!(em & (1 << 1));
+  $('m-scoreboard').checked  = !!(em & (1 << 2));
+  $('m-pomodoro').checked    = !!(em & (1 << 3));
+  $('m-youtube').checked     = !!(em & (1 << 4));
+  $('m-customclock').checked = !!(em & (1 << 5));
+  $('m-album').checked       = !!(em & (1 << 6));
+  $('m-weather').checked     = !!(em & (1 << 7));
 
   /* Colour swatches */
   const sw = $('color-swatches'); sw.innerHTML = '';
@@ -334,12 +340,13 @@ async function saveSettings() {
     return [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)];
   });
   const enabledModes = (1 << 0) |  /* Clock always on */
-    ($('m-countdown').checked  ? (1 << 1) : 0) |
-    ($('m-scoreboard').checked ? (1 << 2) : 0) |
-    ($('m-pomodoro').checked   ? (1 << 3) : 0) |
-    ($('m-youtube').checked    ? (1 << 4) : 0) |
-    ($('m-album').checked      ? (1 << 5) : 0) |
-    ($('m-bilibili').checked   ? (1 << 6) : 0);
+    ($('m-countdown').checked   ? (1 << 1) : 0) |
+    ($('m-scoreboard').checked  ? (1 << 2) : 0) |
+    ($('m-pomodoro').checked    ? (1 << 3) : 0) |
+    ($('m-youtube').checked     ? (1 << 4) : 0) |
+    ($('m-customclock').checked ? (1 << 5) : 0) |
+    ($('m-album').checked       ? (1 << 6) : 0) |
+    ($('m-weather').checked     ? (1 << 7) : 0);
   const body = {
     apps: [{ name:'app1', app: cfg.apps?.[0]?.app || 'Clock', theme: $('f-theme').value, type: $('f-timetype').value }],
     lcd_brightness: +$('f-lcdbr').value, led_brightness: +$('f-ledbr').value,

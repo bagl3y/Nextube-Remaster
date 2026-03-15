@@ -12,10 +12,19 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: espressif/idf:v5.5.3
+    outputs:
+      fw_version: ${{ steps.version.outputs.fw_version }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Extract firmware version
+        id: version
+        run: |
+          FW_VER=$(python3 -c "import json; print(json.load(open('version.json'))['version'])")
+          echo "fw_version=$FW_VER" >> $GITHUB_OUTPUT
+          echo "Firmware version: $FW_VER"
 
       - name: Build firmware
         shell: bash
@@ -26,15 +35,16 @@ jobs:
 
       - name: Prepare artifacts
         run: |
+          FW_VER=${{ steps.version.outputs.fw_version }}
           mkdir -p artifacts
-          cp build/nextube-fw.bin           artifacts/nextube-fw-ota.bin
+          cp build/nextube-fw.bin           artifacts/nextube-fw-v${FW_VER}-ota.bin
           cp build/bootloader/bootloader.bin artifacts/
           cp build/partition_table/partition-table.bin artifacts/
           cp build/spiffs.bin               artifacts/
           # Create combined flashable image (USB full-flash only, NOT for OTA)
           . $IDF_PATH/export.sh
           esptool.py --chip esp32 merge_bin \
-            -o artifacts/nextube-fw-full.bin \
+            -o artifacts/nextube-fw-v${FW_VER}-full.bin \
             --flash_mode dio \
             --flash_freq 40m \
             --flash_size 16MB \
@@ -66,14 +76,15 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
+          name: Nextube-Remaster v${{ needs.build.outputs.fw_version }}
           files: |
-            artifacts/nextube-fw-ota.bin
-            artifacts/nextube-fw-full.bin
+            artifacts/nextube-fw-v${{ needs.build.outputs.fw_version }}-ota.bin
+            artifacts/nextube-fw-v${{ needs.build.outputs.fw_version }}-full.bin
             artifacts/bootloader.bin
             artifacts/partition-table.bin
             artifacts/spiffs.bin
           body: |
-            ## Nextube Open-Source Firmware
+            ## Nextube Open-Source Firmware v${{ needs.build.outputs.fw_version }}
 
             ### Flash Instructions
 

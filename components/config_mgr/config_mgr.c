@@ -30,7 +30,7 @@ static void set_defaults(void)
     s_cfg.led_brightness  = 60;
     s_cfg.backlight_mode  = BL_MODE_BREATH;
     s_cfg.backlight_on    = true;
-    s_cfg.enabled_modes   = 0x7F;  /* all 7 modes enabled */
+    s_cfg.enabled_modes   = 0xFF;  /* all 8 modes enabled */
 
     /* Default rainbow-ish backlight colours */
     uint8_t defaults[6][3] = {
@@ -115,6 +115,7 @@ static void parse_json(const char *json)
         else if (strcmp(app_name, "YouTube")     == 0) s_cfg.current_mode = APP_MODE_YOUTUBE;
         else if (strcmp(app_name, "CustomClock") == 0) s_cfg.current_mode = APP_MODE_CUSTOM_CLOCK;
         else if (strcmp(app_name, "Album")       == 0) s_cfg.current_mode = APP_MODE_ALBUM;
+        else if (strcmp(app_name, "Weather")     == 0) s_cfg.current_mode = APP_MODE_WEATHER;
 
         json_read_str(app0, "theme", s_cfg.theme, sizeof(s_cfg.theme));
         json_read_str(app0, "type",  s_cfg.time_type, sizeof(s_cfg.time_type));
@@ -164,7 +165,13 @@ static void parse_json(const char *json)
 
     char bl_onoff[8] = {0};
     json_read_str(root, "backlight_onoff", bl_onoff, sizeof(bl_onoff));
-    s_cfg.backlight_on = (strcmp(bl_onoff, "OFF") != 0);
+    /* Only update when the key is actually present in the payload.
+     * If absent (e.g. a mode-change-only JSON), bl_onoff stays empty and
+     * we must not corrupt the current state: strcmp("","OFF")!=0 would
+     * incorrectly force backlight_on = true every time. */
+    if (bl_onoff[0] != '\0') {
+        s_cfg.backlight_on = (strcmp(bl_onoff, "OFF") != 0);
+    }
 
     json_read_u8(root, "enabled_modes", &s_cfg.enabled_modes);
     /* Always keep Clock (bit 0) enabled so the device is never stuck with no mode */

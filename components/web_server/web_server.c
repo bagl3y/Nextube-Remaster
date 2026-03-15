@@ -22,7 +22,9 @@
 static const char *TAG = "web_srv";
 static httpd_handle_t s_server = NULL;
 
-#define FW_VER "1.0.0-oss"
+#ifndef FW_VERSION_STR
+#define FW_VERSION_STR "0.0.0"
+#endif
 #define HW_VER "1.31"
 
 static esp_err_t send_json(httpd_req_t *req, const char *json)
@@ -33,7 +35,7 @@ static esp_err_t send_json(httpd_req_t *req, const char *json)
 }
 
 static esp_err_t api_ping(httpd_req_t *r)       { return send_json(r, "{\"status\":\"ok\"}"); }
-static esp_err_t api_fw_ver(httpd_req_t *r)      { return send_json(r, "{\"version\":\"" FW_VER "\"}"); }
+static esp_err_t api_fw_ver(httpd_req_t *r)      { return send_json(r, "{\"version\":\"" FW_VERSION_STR "\"}"); }
 static esp_err_t api_hw_ver(httpd_req_t *r)      { return send_json(r, "{\"version\":\"" HW_VER "\"}"); }
 
 static esp_err_t api_get_settings(httpd_req_t *r)
@@ -114,10 +116,12 @@ static esp_err_t api_status(httpd_req_t *r)
     const sub_count_t *s = youtube_bili_get();
     if (s->valid) cJSON_AddNumberToObject(root, "subscribers", s->subscriber_count);
     cJSON_AddNumberToObject(root, "heap_free", esp_get_free_heap_size());
-    cJSON_AddStringToObject(root, "firmware", FW_VER);
+    cJSON_AddStringToObject(root, "firmware", FW_VERSION_STR);
     const nextube_config_t *cfg = config_get();
-    const char *modes[] = {"Clock","Countdown","Scoreboard","Pomodoro","YouTube","CustomClock","Album"};
-    cJSON_AddStringToObject(root, "mode", modes[cfg->current_mode]);
+    const char *modes[] = {"Clock","Countdown","Scoreboard","Pomodoro","YouTube","CustomClock","Album","Weather"};
+    int mode_idx = (int)cfg->current_mode;
+    if (mode_idx < 0 || mode_idx >= (int)(sizeof(modes)/sizeof(modes[0]))) mode_idx = 0;
+    cJSON_AddStringToObject(root, "mode", modes[mode_idx]);
     char *json = cJSON_PrintUnformatted(root);
     esp_err_t ret = send_json(r, json);
     free(json); cJSON_Delete(root);
