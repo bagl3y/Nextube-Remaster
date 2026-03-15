@@ -518,6 +518,7 @@ static void display_task(void *arg)
     int32_t       last_remain_s = INT32_MAX;  /* countdown/pomodoro change detection */
     float         last_temp_c  = -9999.0f;    /* weather change detection */
     float         last_hum     = -1.0f;
+    bool          last_wx_valid = false;      /* detect when data first arrives */
     bool          last_bl_on   = true;        /* backlight on/off tracking */
     uint8_t       last_bl_brt  = 255;         /* sentinel: force-apply on first tick */
     TickType_t    album_switch = 0;
@@ -624,11 +625,17 @@ static void display_task(void *arg)
 
         case APP_MODE_WEATHER: {
             const weather_data_t *w = weather_get();
-            bool wx_changed = w && w->valid &&
+            bool now_valid  = (w != NULL && w->valid);
+            /* Trigger re-render when: first draw, mode/theme change, new data
+             * values arrived, OR validity flips (e.g. data fetched for the
+             * first time while already showing the blank loading screen). */
+            bool wx_changed = now_valid && last_wx_valid &&
                               (w->temp_c != last_temp_c || w->humidity != last_hum);
-            if (first || mode_changed || theme_changed || wx_changed) {
+            bool valid_changed = (now_valid != last_wx_valid);
+            if (first || mode_changed || theme_changed || wx_changed || valid_changed) {
                 render_weather(cfg);
-                if (w && w->valid) { last_temp_c = w->temp_c; last_hum = w->humidity; }
+                if (now_valid) { last_temp_c = w->temp_c; last_hum = w->humidity; }
+                last_wx_valid = now_valid;
             }
             break;
         }

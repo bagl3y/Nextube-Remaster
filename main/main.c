@@ -26,6 +26,8 @@
 #include "esp_netif.h"
 #include "esp_spiffs.h"
 
+#include "esp_attr.h"
+
 #include "board_pins.h"
 #include "config_mgr.h"
 #include "display.h"
@@ -40,6 +42,18 @@
 #include "youtube_bili.h"
 
 static const char *TAG = "main";
+
+/* ── WiFi-safe warm-boot ───────────────────────────────────────────────
+ * After esptool flashes and hard-resets via the EN pin (ESP_RST_EXT) the
+ * WiFi PHY is left in an unclean state and the soft-AP silently fails to
+ * start.  A firmware-initiated esp_restart() resolves it cleanly.
+ *
+ * RTC fast memory persists through software resets but is cleared by any
+ * hardware reset (EN pin / power-on), so s_warm_boot is 0 whenever we
+ * come from a hard reset and WARM_BOOT_MAGIC otherwise.  We restart exactly
+ * once per hard-reset without looping. */
+RTC_DATA_ATTR static uint32_t s_warm_boot;
+#define WARM_BOOT_MAGIC  0x574F524Du   /* "WORM" */
 
 /* ── Touch handler ─────────────────────────────────────────────────── */
 static void on_touch(touch_pad_id_t pad)
@@ -122,16 +136,21 @@ void app_main(void)
 #ifndef FW_VERSION_STR
 #define FW_VERSION_STR "0.0.0"
 #endif
+    /* Restart once after any hard reset so WiFi PHY initialises cleanly.
+     * (See s_warm_boot comment above.) */
+    if (esp_reset_reason() == ESP_RST_EXT && s_warm_boot != WARM_BOOT_MAGIC) {
+        s_warm_boot = WARM_BOOT_MAGIC;
+        esp_restart();   /* causes ESP_RST_SW on next boot → skips this block */
+    }
+    s_warm_boot = 0;     /* clear so the next hard-reset also triggers a restart */
+
     ESP_LOGI(TAG, "╔════════════════════════════════════════════════╗");
     ESP_LOGI(TAG, "║  Nextube Open-Source Firmware v%-16s ║", FW_VERSION_STR);
     ESP_LOGI(TAG, "║  https://github.com/MrToast99/Nextube-Remaster ║");
     ESP_LOGI(TAG, "╚════════════════════════════════════════════════╝");
 
-    /* Allow power rails and SPI peripherals to fully settle.
-     * After a full-flash via esptool, the SPI bus can be in an indeterminate
-     * state after the software reset; this pause ensures display_init()'s
-     * RST pulse starts from a clean state and avoids needing a power cycle. */
-    vTaskDelay(pdMS_TO_TICKS(500));
+    /* Allow power rails and SPI peripherals to fully settle. */
+    vTaskDelay(pdMS_TO_TICKS(200));
 
     /* Core initialisations */
     init_nvs();

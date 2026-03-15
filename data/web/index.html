@@ -22,8 +22,9 @@ main{padding:0 1rem 2rem}
 .card h2{font-size:1rem;margin-bottom:.8rem;color:var(--hi);border-bottom:1px solid rgba(255,255,255,.05);padding-bottom:.5rem}
 .field{margin-bottom:.8rem}
 .field label{display:block;font-size:.8rem;color:var(--dim);margin-bottom:4px}
-.field input,.field select{width:100%;padding:.5rem;border:1px solid rgba(255,255,255,.1);border-radius:6px;background:rgba(0,0,0,.2);color:var(--text);font-size:.9rem}
+.field input,.field select{width:100%;padding:.5rem;border:1px solid rgba(255,255,255,.1);border-radius:6px;background:var(--accent);color:var(--text);font-size:.9rem}
 .field input:focus,.field select:focus{outline:none;border-color:var(--hi)}
+select option{background:var(--accent);color:var(--text)}
 .field input[type=range]{padding:0;height:6px;-webkit-appearance:none;background:rgba(255,255,255,.1);border:none;border-radius:3px}
 .field input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;height:16px;border-radius:50%;background:var(--hi);cursor:pointer}
 .row{display:grid;grid-template-columns:1fr 1fr;gap:.8rem}
@@ -55,6 +56,10 @@ main{padding:0 1rem 2rem}
   <div id="conn-status"><span class="status-dot err"></span>Connecting…</div>
 </header>
 
+<div id="ver-mismatch" style="display:none;background:rgba(233,69,96,.15);border:1px solid rgba(233,69,96,.5);border-radius:8px;padding:.65rem 1rem;margin:.5rem 1rem 0;font-size:.83rem;line-height:1.5">
+  ⚠️ <strong>Web UI / Firmware version mismatch</strong> — firmware is <strong id="vm-fw"></strong> but SPIFFS web UI is <strong id="vm-sp"></strong>.
+  Go to <strong>System → Web UI Update</strong> and flash the matching <code>spiffs.bin</code>.
+</div>
 <nav id="tabs">
   <button class="active" data-tab="dashboard">Dashboard</button>
   <button data-tab="display">Display</button>
@@ -122,7 +127,7 @@ main{padding:0 1rem 2rem}
     <div class="field meter"><label>LED Brightness</label><input type="range" id="f-ledbr" min="0" max="100"><span id="v-ledbr">60</span>%</div>
   </div>
   <div class="card">
-    <h2>Backlight</h2>
+    <h2>LED Accent Lighting</h2>
     <div class="field"><label>Mode</label>
       <select id="f-blmode"><option>Static</option><option>Breath</option><option>Rainbow</option><option>Off</option></select>
     </div>
@@ -494,6 +499,16 @@ async function refreshStatus() {
   $('s-heap').textContent = s.heap_free ? (s.heap_free/1024).toFixed(0) + 'K' : '--';
   $('s-wifi').textContent = s.wifi_connected ? s.ip : 'No WiFi';
   $('s-fwver').textContent = s.firmware || '--';
+
+  /* Version mismatch banner */
+  const fw = s.firmware, sp = s.spiffs_version;
+  if (fw && sp && sp !== 'unknown' && fw !== sp) {
+    $('vm-fw').textContent = fw;
+    $('vm-sp').textContent = sp;
+    $('ver-mismatch').style.display = 'block';
+  } else {
+    $('ver-mismatch').style.display = 'none';
+  }
 }
 
 /* ── Init ──────────────────────────────────────────── */

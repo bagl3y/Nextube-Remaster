@@ -119,6 +119,16 @@ static esp_err_t api_status(httpd_req_t *r)
     if (s->valid) cJSON_AddNumberToObject(root, "subscribers", s->subscriber_count);
     cJSON_AddNumberToObject(root, "heap_free", esp_get_free_heap_size());
     cJSON_AddStringToObject(root, "firmware", FW_VERSION_STR);
+    /* Read the SPIFFS-side version so the UI can warn when firmware and web
+     * UI are from different builds (e.g. after a firmware-only OTA). */
+    char spiffs_ver[32] = "unknown";
+    FILE *vf = fopen("/spiffs/web/version.txt", "r");
+    if (vf) {
+        if (fgets(spiffs_ver, sizeof(spiffs_ver), vf))
+            spiffs_ver[strcspn(spiffs_ver, "\r\n")] = '\0';
+        fclose(vf);
+    }
+    cJSON_AddStringToObject(root, "spiffs_version", spiffs_ver);
     const nextube_config_t *cfg = config_get();
     const char *modes[] = {"Clock","Countdown","Scoreboard","Pomodoro","YouTube","CustomClock","Album","Weather"};
     int mode_idx = (int)cfg->current_mode;
