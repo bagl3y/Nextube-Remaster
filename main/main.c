@@ -29,6 +29,7 @@
 #include "board_pins.h"
 #include "config_mgr.h"
 #include "display.h"
+#include "audio.h"
 #include "leds.h"
 #include "touch_input.h"
 #include "rtc_pcf8563.h"
@@ -46,7 +47,7 @@ static void init_spiffs(void)
     esp_vfs_spiffs_conf_t conf = {
         .base_path       = "/spiffs",
         .partition_label = "spiffs",
-        .max_files       = 10,
+        .max_files       = 20,
         .format_if_mount_failed = true,
     };
     esp_err_t err = esp_vfs_spiffs_register(&conf);
@@ -88,9 +89,15 @@ void app_main(void)
 
     /* Load configuration from /spiffs/config.json (or defaults) */
     config_mgr_init();
+    const nextube_config_t *cfg = config_get();
 
     /* Hardware drivers */
     display_init();
+    display_task_start();          /* launch 5 Hz FreeRTOS display task */
+
+    audio_init();
+    audio_set_volume(cfg->volume); /* restore saved volume level */
+
     leds_init();
     touch_input_init();
     rtc_init();

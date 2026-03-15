@@ -1,13 +1,72 @@
+/**
+ * @file display.h
+ * @brief Nextube display driver – 6x ST7735 LCDs + JPEG asset renderer
+ *
+ * Each tube LCD is 80×160 px RGB565.  Images are loaded from SPIFFS
+ * using the active theme.  Asset layout (mirrored from original firmware):
+ *
+ *   /images/themes/{theme}/Numbers/{0-9}.jpg
+ *   /images/themes/{theme}/AMPM/{am,pm,colon,blank,dot,…}.jpg
+ *   /images/themes/{theme}/MutiInfo/Weather/{sun,rain,…}.jpg
+ *   /images/themes/{theme}/MutiInfo/Temperature/{degreec,degreef,minus}.jpg
+ *   /images/themes/{theme}/MutiInfo/Humidity/{degree,humidity}.jpg
+ *   /images/themes/{theme}/MutiInfo/WeekDate/week/{monday,…}.jpg
+ *   /images/themes/{theme}/MutiInfo/WeekDate/date/{0-9}.jpg
+ *   /images/system/{matrix,setting,waiting}/
+ *
+ * Available themes: NixieOY, FlipClock, DarkSlate, DotMatrixRG, DotMatrixY,
+ *   Formula1, GlitchGR, LightFuture, NotionRain, RedDigits, RetroPaper,
+ *   WireMesh, Custom, Custom01, Custom02, Custom03
+ */
 #pragma once
 #include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* ── Hardware constants ────────────────────────────────────────────── */
+#define LCD_WIDTH    80
+#define LCD_HEIGHT  160
+#define LCD_COUNT     6
+
+/* ── Low-level hardware ────────────────────────────────────────────── */
 void display_init(void);
 void display_set_brightness(uint8_t pct);
+void display_fill(int tube, uint16_t colour);
 void display_show_digit(int tube, const uint8_t *rgb565_data, int w, int h);
-void display_fill(int tube, uint16_t color);
+
+/* ── JPEG asset loader ─────────────────────────────────────────────── */
+/** Load JPEG from SPIFFS, decode RGB565, push to tube.  Falls back to
+ *  black fill on any error.  Uses 8 MB PSRAM decode buffer. */
+void display_show_image(int tube, const char *path);
+
+/* ── Path builders ─────────────────────────────────────────────────── */
+void display_path_number     (char *buf, size_t n, const char *theme, int digit);
+void display_path_ampm       (char *buf, size_t n, const char *theme, const char *name);
+void display_path_weather    (char *buf, size_t n, const char *theme, const char *cond);
+void display_path_temperature(char *buf, size_t n, const char *theme, const char *name);
+void display_path_weekday    (char *buf, size_t n, const char *theme, int wday);
+void display_path_date_digit (char *buf, size_t n, const char *theme, int digit);
+void display_path_system     (char *buf, size_t n, const char *cat,   const char *name);
+
+/* ── High-level helpers ────────────────────────────────────────────── */
+void display_show_number(int tube, int digit,        const char *theme);
+void display_show_ampm  (int tube, const char *name, const char *theme);
+
+/** Legacy shim – full rendering is handled by display_task_start(). */
 void display_show_time(int h, int m, int s, const char *theme);
+
+/* ── Display task ──────────────────────────────────────────────────── */
+/** Launch the FreeRTOS display task (core 1, 5 Hz).  Re-renders
+ *  whenever mode / time / weather / subscriber count changes.
+ *  Call once after display_init(). */
+void display_task_start(void);
+
+/** Reset the countdown / pomodoro internal timer (call on mode entry). */
+void display_timer_reset(void);
+
 #ifdef __cplusplus
 }
 #endif

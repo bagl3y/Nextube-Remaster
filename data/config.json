@@ -1,0 +1,79 @@
+{
+  "rtc_type": "pcf",
+  "apps": [
+    {
+      "name": "app1",
+      "app": "Clock",
+      "theme": "NixieOY",
+      "type": "24H",
+      "info_du": 1,
+      "info_lst": [
+        "Weather",
+        "Week",
+        "Indoor",
+        "Temp"
+      ]
+    }
+  ],
+  "default_app_name": "app1",
+  "album_switch_time": 2000,
+  "album_switch_step": 6,
+  "video_site": "youtube",
+  "youtube_id": "",
+  "youtube_key": "",
+  "bili_uid": "1",
+  "default_countdown_time": 1,
+  "alarm_time": [],
+  "spectrum_RGB": [
+    50,
+    80,
+    100
+  ],
+  "ssid": "",
+  "password": "",
+  "weather_api_key": "",
+  "time_zone": -21600,
+  "City": "",
+  "temperature_formate": "Celsius",
+  "music_file": "/audio/Unwritten.mp3",
+  "bell_file": "/audio/bell.wav",
+  "tone_file": "/audio/tremolo3.wav",
+  "timer_file": "/audio/timer.wav",
+  "volume": 20,
+  "lcd_brightness": 30,
+  "led_brightness": 60,
+  "backlight_onoff": "ON",
+  "backlight_mode": "Breath",
+  "backlight_RGB": [
+    [
+      200,
+      0,
+      0
+    ],
+    [
+      0,
+      200,
+      0
+    ],
+    [
+      0,
+      0,
+      200
+    ],
+    [
+      110,
+      100,
+      0
+    ],
+    [
+      0,
+      200,
+      200
+    ],
+    [
+      200,
+      0,
+      200
+    ]
+  ]
+}

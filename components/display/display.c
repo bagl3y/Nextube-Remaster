@@ -130,12 +130,418 @@ void display_show_digit(int tube, const uint8_t *data, int w, int h)
     deselect_all();
 }
 
+/* ════════════════════════════════════════════════════════════════════
+ *  JPEG asset loader
+ * ════════════════════════════════════════════════════════════════════ */
+#include <stdio.h>
+#include <stdlib.h>
+#include "esp_heap_caps.h"
+#include "esp_jpeg_dec.h"   /* ESP-IDF 5.x esp_jpeg component */
+
+/* Allocate decode buffer from PSRAM so we don't exhaust IRAM. */
+#define PSRAM_MALLOC(sz)  heap_caps_malloc((sz), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+
+void display_show_image(int tube, const char *path)
+{
+    if (tube < 0 || tube >= LCD_COUNT || !path) return;
+
+    /* ── 1. Read JPEG file from SPIFFS ─────────────────────────── */
+    char full[320];
+    snprintf(full, sizeof(full), "/spiffs%s", path);
+    FILE *f = fopen(full, "rb");
+    if (!f) {
+        ESP_LOGW(TAG, "Image not found: %s", full);
+        display_fill(tube, 0x0000);
+        return;
+    }
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz <= 0 || sz > 200000) { fclose(f); display_fill(tube, 0x0000); return; }
+
+    uint8_t *jpeg_buf = PSRAM_MALLOC(sz);
+    if (!jpeg_buf) { fclose(f); display_fill(tube, 0x0000); return; }
+    fread(jpeg_buf, 1, sz, f);
+    fclose(f);
+
+    /* ── 2. Decode JPEG → RGB565 (big-endian for ST7735) ────────── */
+    jpeg_dec_config_t cfg = {
+        .output_type = JPEG_RAW_TYPE_RGB565_BE,
+        .rotate      = JPEG_ROTATE_0D,
+    };
+    jpeg_dec_handle_t dec = NULL;
+    if (jpeg_dec_open(&cfg, &dec) != JPEG_ERR_OK) {
+        free(jpeg_buf); display_fill(tube, 0x0000); return;
+    }
+
+    jpeg_dec_io_t io = { .inbuf = jpeg_buf, .inbuf_len = (uint32_t)sz };
+    jpeg_dec_header_info_t hdr = {0};
+    if (jpeg_dec_parse_header(dec, &io, &hdr) != JPEG_ERR_OK) {
+        jpeg_dec_close(dec); free(jpeg_buf); display_fill(tube, 0x0000); return;
+    }
+
+    size_t out_sz = hdr.width * hdr.height * 2;
+    uint8_t *rgb_buf = PSRAM_MALLOC(out_sz);
+    if (!rgb_buf) {
+        jpeg_dec_close(dec); free(jpeg_buf); display_fill(tube, 0x0000); return;
+    }
+    io.outbuf = rgb_buf;
+    esp_err_t dec_err = (jpeg_dec_process(dec, &io) == JPEG_ERR_OK) ? ESP_OK : ESP_FAIL;
+    jpeg_dec_close(dec);
+    free(jpeg_buf);
+
+    if (dec_err != ESP_OK) {
+        free(rgb_buf); display_fill(tube, 0x0000); return;
+    }
+
+    /* ── 3. Push RGB565 frame to LCD ────────────────────────────── */
+    display_show_digit(tube, rgb_buf, (int)hdr.width, (int)hdr.height);
+    free(rgb_buf);
+}
+
+/* ── Path builders ─────────────────────────────────────────────────── */
+void display_path_number(char *buf, size_t n, const char *theme, int digit)
+{ snprintf(buf, n, "/images/themes/%s/Numbers/%d.jpg", theme, digit); }
+
+void display_path_ampm(char *buf, size_t n, const char *theme, const char *name)
+{ snprintf(buf, n, "/images/themes/%s/AMPM/%s.jpg", theme, name); }
+
+void display_path_weather(char *buf, size_t n, const char *theme, const char *cond)
+{ snprintf(buf, n, "/images/themes/%s/MutiInfo/Weather/%s.jpg", theme, cond); }
+
+void display_path_temperature(char *buf, size_t n, const char *theme, const char *name)
+{ snprintf(buf, n, "/images/themes/%s/MutiInfo/Temperature/%s.jpg", theme, name); }
+
+void display_path_weekday(char *buf, size_t n, const char *theme, int wday)
+{
+    /* struct tm: 0=Sunday … 6=Saturday */
+    const char *days[] = {"sunday","monday","tuesday","wednesday","thursday","friday","saturday"};
+    snprintf(buf, n, "/images/themes/%s/MutiInfo/WeekDate/week/%s.jpg",
+             theme, (wday >= 0 && wday <= 6) ? days[wday] : "monday");
+}
+
+void display_path_date_digit(char *buf, size_t n, const char *theme, int digit)
+{ snprintf(buf, n, "/images/themes/%s/MutiInfo/WeekDate/date/%d.jpg", theme, digit); }
+
+void display_path_system(char *buf, size_t n, const char *cat, const char *name)
+{ snprintf(buf, n, "/images/system/%s/%s.jpg", cat, name); }
+
+/* ── High-level helpers ────────────────────────────────────────────── */
+void display_show_number(int tube, int digit, const char *theme)
+{
+    char p[256]; display_path_number(p, sizeof(p), theme, digit);
+    display_show_image(tube, p);
+}
+
+void display_show_ampm(int tube, const char *name, const char *theme)
+{
+    char p[256]; display_path_ampm(p, sizeof(p), theme, name);
+    display_show_image(tube, p);
+}
+
+/* Legacy shim */
 void display_show_time(int h, int m, int s, const char *theme)
 {
-    /* TODO: Load theme digit images from SPIFFS. For now: coloured fills per digit. */
     int digits[6] = {h/10, h%10, m/10, m%10, s/10, s%10};
-    for (int i = 0; i < 6; i++) {
-        uint16_t r = (digits[i]*3)&0x1F, g = (16+digits[i]*6)&0x3F, b = (31-digits[i]*2)&0x1F;
-        display_fill(i, (r<<11)|(g<<5)|b);
+    for (int i = 0; i < 6; i++) display_show_number(i, digits[i], theme);
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ *  Display task – full mode renderer
+ * ════════════════════════════════════════════════════════════════════ */
+#include "config_mgr.h"
+#include "ntp_time.h"
+#include "weather.h"
+#include "youtube_bili.h"
+#include "freertos/semphr.h"
+
+/* Map OpenWeatherMap "main" condition string → asset filename */
+static const char *weather_icon(const char *cond)
+{
+    if (!cond || !*cond) return "sun";
+    if      (strcasecmp(cond, "Clear")       == 0) return "sun";
+    else if (strcasecmp(cond, "Rain")        == 0) return "rain";
+    else if (strcasecmp(cond, "Drizzle")     == 0) return "rain";
+    else if (strcasecmp(cond, "Snow")        == 0) return "snow";
+    else if (strcasecmp(cond, "Thunderstorm")== 0) return "thunderstorm";
+    else if (strcasecmp(cond, "Fog")         == 0) return "fog";
+    else if (strcasecmp(cond, "Mist")        == 0) return "fog";
+    else if (strcasecmp(cond, "Haze")        == 0) return "fog";
+    else if (strcasecmp(cond, "Clouds")      == 0) return "overcastClouds";
+    else if (strcasecmp(cond, "Tornado")     == 0) return "tornado";
+    else if (strcasecmp(cond, "Sand")        == 0) return "sand";
+    else if (strcasecmp(cond, "Squall")      == 0) return "squalls";
+    else if (strcasecmp(cond, "Ash")         == 0) return "volcanicAsh";
+    return "sun";
+}
+
+/* ── Mode render helpers ────────────────────────────────────────────── */
+
+static void render_clock(const nextube_config_t *cfg, const struct tm *t)
+{
+    bool is_12h = (strcmp(cfg->time_type, "12H") == 0);
+    int h = t->tm_hour, m = t->tm_min, s = t->tm_sec;
+    char p[256];
+
+    if (is_12h) {
+        bool pm = (h >= 12);
+        h = h % 12;
+        if (h == 0) h = 12;
+        /* tubes 0-4: H1 H2 M1 M2 S1   tube 5: am/pm icon */
+        int d[5] = {h/10, h%10, m/10, m%10, s/10};
+        for (int i = 0; i < 5; i++) {
+            /* leading zero on hour suppressed → show blank */
+            if (i == 0 && d[0] == 0)
+                display_show_ampm(0, "blank", cfg->theme);
+            else
+                display_show_number(i, d[i], cfg->theme);
+        }
+        display_show_ampm(5, pm ? "pm" : "am", cfg->theme);
+    } else {
+        /* 24H: all six tubes = H1 H2 M1 M2 S1 S2 */
+        int d[6] = {h/10, h%10, m/10, m%10, s/10, s%10};
+        for (int i = 0; i < 6; i++) display_show_number(i, d[i], cfg->theme);
     }
+    (void)p;
+}
+
+static void render_number6(uint32_t value, const char *theme,
+                           const char *icon_tube0, const char *suffix_tube5)
+{
+    /* Tube 0: mode icon  |  tubes 1-4: digits  |  tube 5: suffix/blank */
+    if (icon_tube0)
+        display_show_ampm(0, icon_tube0, theme);
+    else {
+        uint8_t d0 = (value / 100000) % 10;
+        display_show_number(0, d0, theme);
+    }
+    display_show_number(1, (value / 10000) % 10, theme);
+    display_show_number(2, (value /  1000) % 10, theme);
+    display_show_number(3, (value /   100) % 10, theme);
+    display_show_number(4, (value /    10) % 10, theme);
+    if (suffix_tube5)
+        display_show_ampm(5, suffix_tube5, theme);
+    else
+        display_show_number(5, value % 10, theme);
+}
+
+static void render_subs(const nextube_config_t *cfg)
+{
+    const sub_count_t *s = youtube_bili_get();
+    uint32_t count = s->valid ? (uint32_t)s->subscriber_count : 0;
+
+    if (count >= 1000000) {
+        render_number6(count / 1000, cfg->theme, "youtube", "m-sub");
+    } else if (count >= 1000) {
+        render_number6(count / 1000, cfg->theme, "youtube", "k-sub");
+    } else {
+        /* tube 0 = youtube icon, tubes 1-5 = 5-digit count */
+        display_show_ampm(0, "youtube", cfg->theme);
+        for (int i = 0; i < 5; i++)
+            display_show_number(i+1, (count / (uint32_t[]){10000,1000,100,10,1}[i]) % 10, cfg->theme);
+    }
+}
+
+static void render_countdown_display(const nextube_config_t *cfg,
+                                     int32_t remaining_s)
+{
+    if (remaining_s < 0) remaining_s = 0;
+    int m = remaining_s / 60, s = remaining_s % 60;
+    display_show_ampm(0, "countdown", cfg->theme);
+    display_show_number(1, m / 10,  cfg->theme);
+    display_show_number(2, m % 10,  cfg->theme);
+    display_show_ampm  (3, "colon", cfg->theme);
+    display_show_number(4, s / 10,  cfg->theme);
+    display_show_number(5, s % 10,  cfg->theme);
+}
+
+static void render_pomodoro_display(const nextube_config_t *cfg,
+                                    int32_t remaining_s, bool in_break)
+{
+    if (remaining_s < 0) remaining_s = 0;
+    int m = remaining_s / 60, s = remaining_s % 60;
+    display_show_ampm(0, "pomodoro", cfg->theme);
+    display_show_number(1, m / 10, cfg->theme);
+    display_show_number(2, m % 10, cfg->theme);
+    display_show_ampm  (3, "colon", cfg->theme);
+    display_show_number(4, s / 10, cfg->theme);
+    display_show_ampm  (5, in_break ? "pomodorolb" : "pomodorosb", cfg->theme);
+}
+
+static void render_scoreboard(const nextube_config_t *cfg)
+{
+    /* Show 6 zeros until score data is driven via a future API. */
+    for (int i = 0; i < 6; i++) display_show_number(i, 0, cfg->theme);
+}
+
+/* Album: cycle through /images/album/*.jpg files */
+#include "dirent.h"
+#define MAX_ALBUM 64
+static char s_album_files[MAX_ALBUM][128];
+static int  s_album_count  = 0;
+static int  s_album_index  = 0;
+static bool s_album_loaded = false;
+
+static void album_load_list(void)
+{
+    if (s_album_loaded) return;
+    s_album_count = 0;
+    DIR *dp = opendir("/spiffs/images/album");
+    if (dp) {
+        struct dirent *e;
+        while ((e = readdir(dp)) && s_album_count < MAX_ALBUM) {
+            char *ext = strrchr(e->d_name, '.');
+            if (ext && strcasecmp(ext, ".jpg") == 0) {
+                snprintf(s_album_files[s_album_count], 128,
+                         "/images/album/%s", e->d_name);
+                s_album_count++;
+            }
+        }
+        closedir(dp);
+    }
+    s_album_loaded = true;
+}
+
+static void render_album(const nextube_config_t *cfg,
+                         TickType_t *last_switch, bool force)
+{
+    album_load_list();
+    if (s_album_count == 0) {
+        for (int i = 0; i < LCD_COUNT; i++) display_fill(i, 0x0000);
+        return;
+    }
+    uint32_t interval_ms = cfg->album_switch_ms ? cfg->album_switch_ms : 2000;
+    TickType_t now = xTaskGetTickCount();
+    if (force || (now - *last_switch) >= pdMS_TO_TICKS(interval_ms)) {
+        *last_switch = now;
+        /* Same image on all 6 tubes (each tube shows a crop / the full image). */
+        for (int i = 0; i < LCD_COUNT; i++)
+            display_show_image(i, s_album_files[s_album_index]);
+        s_album_index = (s_album_index + 1) % s_album_count;
+    }
+}
+
+/* ── Timer state ────────────────────────────────────────────────────── */
+static TickType_t s_timer_start   = 0;
+static bool       s_pomo_in_break = false;
+static SemaphoreHandle_t s_timer_mutex = NULL;
+
+void display_timer_reset(void)
+{
+    if (s_timer_mutex) xSemaphoreTake(s_timer_mutex, portMAX_DELAY);
+    s_timer_start   = xTaskGetTickCount();
+    s_pomo_in_break = false;
+    if (s_timer_mutex) xSemaphoreGive(s_timer_mutex);
+}
+
+/* ── Main display task ──────────────────────────────────────────────── */
+static void display_task(void *arg)
+{
+    s_timer_mutex  = xSemaphoreCreateMutex();
+    s_timer_start  = xTaskGetTickCount();
+
+    /* Per-render state for change detection */
+    struct tm     last_t       = {0};
+    app_mode_t    last_mode    = (app_mode_t)-1;
+    char          last_theme[32] = {0};
+    uint32_t      last_subs    = UINT32_MAX;
+    TickType_t    album_switch = 0;
+    bool          first        = true;
+
+    TickType_t wake = xTaskGetTickCount();
+
+    while (1) {
+        const nextube_config_t *cfg = config_get();
+        app_mode_t mode = cfg->current_mode;
+        bool mode_changed  = (mode != last_mode);
+        bool theme_changed = (strcmp(cfg->theme, last_theme) != 0);
+
+        if (mode_changed || theme_changed || first) {
+            /* Reset album on mode/theme switch */
+            s_album_loaded = false; s_album_index = 0; album_switch = 0;
+            display_timer_reset();
+        }
+
+        switch (mode) {
+
+        case APP_MODE_CLOCK:
+        case APP_MODE_CUSTOM_CLOCK: {
+            struct tm t; ntp_get_local(&t);
+            if (first || mode_changed || theme_changed ||
+                t.tm_sec  != last_t.tm_sec  ||
+                t.tm_min  != last_t.tm_min  ||
+                t.tm_hour != last_t.tm_hour) {
+                render_clock(cfg, &t);
+                last_t = t;
+            }
+            break;
+        }
+
+        case APP_MODE_COUNTDOWN: {
+            xSemaphoreTake(s_timer_mutex, portMAX_DELAY);
+            int32_t elapsed = (int32_t)pdTICKS_TO_MS(xTaskGetTickCount() - s_timer_start) / 1000;
+            xSemaphoreGive(s_timer_mutex);
+            int32_t total   = (int32_t)cfg->countdown_minutes * 60;
+            int32_t remain  = total - elapsed;
+            render_countdown_display(cfg, remain);
+            break;
+        }
+
+        case APP_MODE_POMODORO: {
+            xSemaphoreTake(s_timer_mutex, portMAX_DELAY);
+            int32_t elapsed = (int32_t)pdTICKS_TO_MS(xTaskGetTickCount() - s_timer_start) / 1000;
+            bool in_break   = s_pomo_in_break;
+            xSemaphoreGive(s_timer_mutex);
+
+            int32_t period  = in_break ? (int32_t)cfg->pomodoro_break * 60
+                                       : (int32_t)cfg->pomodoro_work  * 60;
+            int32_t remain  = period - elapsed;
+            if (remain <= 0) {
+                /* Flip work/break */
+                xSemaphoreTake(s_timer_mutex, portMAX_DELAY);
+                s_pomo_in_break = !s_pomo_in_break;
+                s_timer_start   = xTaskGetTickCount();
+                in_break        = s_pomo_in_break;
+                xSemaphoreGive(s_timer_mutex);
+                remain = in_break ? (int32_t)cfg->pomodoro_break * 60
+                                  : (int32_t)cfg->pomodoro_work  * 60;
+            }
+            render_pomodoro_display(cfg, remain, in_break);
+            break;
+        }
+
+        case APP_MODE_YOUTUBE: {
+            const sub_count_t *sub = youtube_bili_get();
+            uint32_t count = sub->valid ? (uint32_t)sub->subscriber_count : 0;
+            if (first || mode_changed || theme_changed || count != last_subs) {
+                render_subs(cfg);
+                last_subs = count;
+            }
+            break;
+        }
+
+        case APP_MODE_SCOREBOARD:
+            if (first || mode_changed || theme_changed)
+                render_scoreboard(cfg);
+            break;
+
+        case APP_MODE_ALBUM:
+            render_album(cfg, &album_switch, first || mode_changed || theme_changed);
+            break;
+
+        default: break;
+        }
+
+        last_mode = mode;
+        strncpy(last_theme, cfg->theme, sizeof(last_theme) - 1);
+        first = false;
+
+        vTaskDelayUntil(&wake, pdMS_TO_TICKS(200)); /* 5 Hz */
+    }
+}
+
+void display_task_start(void)
+{
+    xTaskCreatePinnedToCore(display_task, "display", 8192, NULL, 6, NULL, 1);
+    ESP_LOGI(TAG, "Display task started");
 }
