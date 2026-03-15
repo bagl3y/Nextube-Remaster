@@ -261,7 +261,7 @@ void display_show_time(int h, int m, int s, const char *theme)
 #include "freertos/semphr.h"
 
 /* Map OpenWeatherMap "main" condition string → asset filename */
-static const char *weather_icon(const char *cond)
+static const char * __attribute__((unused)) weather_icon(const char *cond)
 {
     if (!cond || !*cond) return "sun";
     if      (strcasecmp(cond, "Clear")       == 0) return "sun";
@@ -379,10 +379,11 @@ static void render_scoreboard(const nextube_config_t *cfg)
     for (int i = 0; i < 6; i++) display_show_number(i, 0, cfg->theme);
 }
 
-/* Album: cycle through /images/album/*.jpg files */
+/* Album: cycle through /images/album/ (jpg) files */
 #include "dirent.h"
-#define MAX_ALBUM 64
-static char s_album_files[MAX_ALBUM][128];
+#define MAX_ALBUM      64
+#define MAX_ALBUM_PATH 280   /* "/images/album/" (14) + d_name (255) + NUL */
+static char s_album_files[MAX_ALBUM][MAX_ALBUM_PATH];
 static int  s_album_count  = 0;
 static int  s_album_index  = 0;
 static bool s_album_loaded = false;
@@ -397,7 +398,7 @@ static void album_load_list(void)
         while ((e = readdir(dp)) && s_album_count < MAX_ALBUM) {
             char *ext = strrchr(e->d_name, '.');
             if (ext && strcasecmp(ext, ".jpg") == 0) {
-                snprintf(s_album_files[s_album_count], 128,
+                snprintf(s_album_files[s_album_count], MAX_ALBUM_PATH,
                          "/images/album/%s", e->d_name);
                 s_album_count++;
             }
