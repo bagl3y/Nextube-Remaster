@@ -6,6 +6,7 @@
 #include "youtube_bili.h"
 #include "display.h"
 #include "leds.h"
+#include "audio.h"
 
 #include "esp_log.h"
 #include "esp_http_server.h"
@@ -37,6 +38,27 @@ static esp_err_t send_json(httpd_req_t *req, const char *json)
 static esp_err_t api_ping(httpd_req_t *r)       { return send_json(r, "{\"status\":\"ok\"}"); }
 static esp_err_t api_fw_ver(httpd_req_t *r)      { return send_json(r, "{\"version\":\"" FW_VERSION_STR "\"}"); }
 static esp_err_t api_hw_ver(httpd_req_t *r)      { return send_json(r, "{\"version\":\"" HW_VER "\"}"); }
+
+/* POST /api/audio/play  { "file": "/spiffs/audio/bell.wav" }
+ * Triggers a one-shot preview of the named audio file at the current volume. */
+static esp_err_t api_audio_play(httpd_req_t *r)
+{
+    char buf[256] = {0};
+    int  n = httpd_req_recv(r, buf, sizeof(buf) - 1);
+    if (n <= 0) return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "No body"), ESP_FAIL;
+    buf[n] = '\0';
+    cJSON *root = cJSON_Parse(buf);
+    if (!root) return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Bad JSON"), ESP_FAIL;
+    cJSON *f = cJSON_GetObjectItem(root, "file");
+    if (!f || !f->valuestring || f->valuestring[0] == '\0') {
+        cJSON_Delete(root);
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Missing file"), ESP_FAIL;
+    }
+    ESP_LOGI("web_srv", "Audio test: %s", f->valuestring);
+    audio_play_file(f->valuestring);
+    cJSON_Delete(root);
+    return send_json(r, "{\"status\":\"ok\"}");
+}
 
 static esp_err_t api_get_settings(httpd_req_t *r)
 {
@@ -365,6 +387,7 @@ static const httpd_uri_t uris[] = {
     R(HTTP_GET,  "/api/firmwareVersion", api_fw_ver),
     R(HTTP_GET,  "/api/hardwareVersion", api_hw_ver),
     R(HTTP_POST, "/api/reset",           api_reset),
+    R(HTTP_POST, "/api/audio/play",      api_audio_play),
     R(HTTP_GET,  "/api/status",          api_status),
     R(HTTP_POST, "/api/update_firmware", api_ota),
     R(HTTP_POST, "/api/update_spiffs",   api_spiffs_ota),

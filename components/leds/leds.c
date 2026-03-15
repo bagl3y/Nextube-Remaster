@@ -124,6 +124,9 @@ void leds_off(void)
     ws2812_write();
 }
 
+/* leds_effect_breath – legacy keyframe-less breath using a fixed warm-blue
+ * palette.  Kept for external callers; the LED task uses the config-aware
+ * version below so per-tube colours are respected. */
 void leds_effect_breath(void)
 {
     static float phase = 0;
@@ -176,10 +179,23 @@ static void led_task(void *arg)
             leds_update();
             vTaskDelay(pdMS_TO_TICKS(100));   /* static: update slowly */
             break;
-        case BL_MODE_BREATH:
-            leds_effect_breath();
+        case BL_MODE_BREATH: {
+            /* Modulate each tube's configured colour with a sine-wave envelope.
+             * The old leds_effect_breath() used a hardcoded blue palette;
+             * this version respects the per-tube backlight_RGB settings. */
+            static float breath_phase = 0.0f;
+            breath_phase += 0.05f;
+            float val = (sinf(breath_phase) + 1.0f) / 2.0f;  /* 0.0 – 1.0 */
+            for (int i = 0; i < LED_COUNT; i++) {
+                leds_set_color(i,
+                    (uint8_t)(cfg->backlight_rgb[i][0] * val),
+                    (uint8_t)(cfg->backlight_rgb[i][1] * val),
+                    (uint8_t)(cfg->backlight_rgb[i][2] * val));
+            }
+            leds_update();
             vTaskDelay(pdMS_TO_TICKS(50));
             break;
+        }
         case BL_MODE_RAINBOW:
             leds_effect_rainbow();
             vTaskDelay(pdMS_TO_TICKS(50));

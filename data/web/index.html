@@ -132,19 +132,19 @@ select option{background:var(--accent);color:var(--text)}
       <select id="f-blmode"><option>Static</option><option>Breath</option><option>Rainbow</option><option>Off</option></select>
     </div>
     <div class="field"><label>LED Colours (click to change)</label>
-      <div id="color-swatches" style="display:flex;gap:8px;flex-wrap:wrap"></div>
+      <div id="color-swatches" style="display:flex;gap:16px;flex-wrap:wrap;margin-top:.4rem"></div>
     </div>
   </div>
   <div class="card">
     <h2>Enabled Modes</h2>
-    <p style="color:var(--dim);font-size:.8rem;margin-bottom:.8rem">Choose which modes are accessible via the touch buttons. Clock is always enabled.</p>
-    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:.6rem">
-      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-clock" disabled checked> Clock</label>
+    <p style="color:var(--dim);font-size:.8rem;margin-bottom:.8rem">Choose which modes are accessible via the touch buttons. Clock and Custom Clock are mutually exclusive — enable one or the other.</p>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:.6rem">
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-clock" checked onchange="onClockToggle(this)"> Clock <span style="font-size:.73rem;color:var(--dim)">(time)</span></label>
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-countdown"> Countdown</label>
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-scoreboard"> Scoreboard</label>
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-pomodoro"> Pomodoro</label>
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-youtube"> YouTube</label>
-      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-customclock"> Custom Clock</label>
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-customclock" onchange="onCustomClockToggle(this)"> Custom Clock <span style="font-size:.73rem;color:var(--dim)">(date)</span></label>
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-album"> Album</label>
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem"><input type="checkbox" id="m-weather"> Weather</label>
     </div>
@@ -211,9 +211,24 @@ select option{background:var(--accent);color:var(--text)}
   <div class="card">
     <h2>Audio Settings</h2>
     <div class="field meter"><label>Volume</label><input type="range" id="f-vol" min="0" max="100"><span id="v-vol">20</span>%</div>
-    <div class="field"><label>Clock Music File</label><input id="f-music" type="text"></div>
-    <div class="field"><label>Bell Sound</label><input id="f-bell" type="text"></div>
-    <div class="field"><label>Timer Sound</label><input id="f-timer" type="text"></div>
+    <div class="field"><label>Clock Music File</label>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input id="f-music" type="text" style="flex:1">
+        <button class="btn btn-outline" style="white-space:nowrap;padding:.35rem .8rem" onclick="testAudio('f-music')">▶ Test</button>
+      </div>
+    </div>
+    <div class="field"><label>Bell Sound</label>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input id="f-bell" type="text" style="flex:1">
+        <button class="btn btn-outline" style="white-space:nowrap;padding:.35rem .8rem" onclick="testAudio('f-bell')">▶ Test</button>
+      </div>
+    </div>
+    <div class="field"><label>Timer Sound</label>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input id="f-timer" type="text" style="flex:1">
+        <button class="btn btn-outline" style="white-space:nowrap;padding:.35rem .8rem" onclick="testAudio('f-timer')">▶ Test</button>
+      </div>
+    </div>
   </div>
   <div class="btn-group"><button class="btn btn-primary" onclick="saveSettings()">Save Audio</button></div>
 </div>
@@ -273,6 +288,27 @@ function toast(msg, err) {
   setTimeout(() => t.className = 'toast', 3000);
 }
 
+/* ── Clock / Custom Clock mutual exclusion ─────────── */
+/* Clock (time) and Custom Clock (date) are mutually exclusive.
+ * Enabling one disables the other; unchecking one re-enables the other
+ * so the device always has at least one clock mode. */
+function onClockToggle(el) {
+  if (el.checked) {
+    $('m-customclock').checked = false;
+  } else {
+    /* Don't allow both off — if user unchecks Clock, enable Custom Clock */
+    if (!$('m-customclock').checked) $('m-customclock').checked = true;
+  }
+}
+function onCustomClockToggle(el) {
+  if (el.checked) {
+    $('m-clock').checked = false;
+  } else {
+    /* Don't allow both off — if user unchecks Custom Clock, enable Clock */
+    if (!$('m-clock').checked) $('m-clock').checked = true;
+  }
+}
+
 /* ── Weather source toggle ─────────────────────────── */
 function toggleWeatherKey() {
   const src = $('f-wsrc') ? $('f-wsrc').value : 'wttr';
@@ -328,8 +364,9 @@ async function loadSettings() {
   $('f-bell').value = cfg.bell_file || '';
   $('f-timer').value = cfg.timer_file || '';
 
-  /* Enabled modes bitmask */
-  const em = cfg.enabled_modes !== undefined ? cfg.enabled_modes : 0xFF;
+  /* Enabled modes bitmask.  Default 0xDF = all on except Custom Clock (bit 5). */
+  const em = cfg.enabled_modes !== undefined ? cfg.enabled_modes : 0xDF;
+  $('m-clock').checked       = !!(em & (1 << 0));
   $('m-countdown').checked   = !!(em & (1 << 1));
   $('m-scoreboard').checked  = !!(em & (1 << 2));
   $('m-pomodoro').checked    = !!(em & (1 << 3));
@@ -338,14 +375,22 @@ async function loadSettings() {
   $('m-album').checked       = !!(em & (1 << 6));
   $('m-weather').checked     = !!(em & (1 << 7));
 
-  /* Colour swatches */
+  /* Colour swatches — one labelled column per tube */
   const sw = $('color-swatches'); sw.innerHTML = '';
   (cfg.backlight_RGB || []).forEach((c,i) => {
+    const col = document.createElement('div');
+    col.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:6px';
+    const lbl = document.createElement('span');
+    lbl.textContent = 'Tube ' + (i + 1);
+    lbl.style.cssText = 'font-size:.75rem;color:var(--dim);white-space:nowrap';
     const d = document.createElement('input');
     d.type = 'color'; d.className = 'color-swatch';
+    d.style.cssText = 'width:44px;height:44px;border:none;background:none;cursor:pointer;padding:2px';
     d.value = '#' + c.map(v => v.toString(16).padStart(2,'0')).join('');
     d.dataset.idx = i;
-    sw.appendChild(d);
+    col.appendChild(lbl);
+    col.appendChild(d);
+    sw.appendChild(col);
   });
 }
 
@@ -355,7 +400,8 @@ async function saveSettings() {
     const h = el.value.replace('#','');
     return [parseInt(h.substr(0,2),16), parseInt(h.substr(2,2),16), parseInt(h.substr(4,2),16)];
   });
-  const enabledModes = (1 << 0) |  /* Clock always on */
+  const enabledModes =
+    ($('m-clock').checked       ? (1 << 0) : 0) |
     ($('m-countdown').checked   ? (1 << 1) : 0) |
     ($('m-scoreboard').checked  ? (1 << 2) : 0) |
     ($('m-pomodoro').checked    ? (1 << 3) : 0) |
@@ -401,6 +447,18 @@ async function scanWifi() {
       </div>`
     ).join('');
   }, 3000);
+}
+
+/* ── Audio test ────────────────────────────────────── */
+async function testAudio(fieldId) {
+  const path = $(fieldId).value.trim();
+  if (!path) return toast('No file path set', true);
+  const res = await api('audio/play', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ file: path })
+  });
+  toast(res?.status === 'ok' ? '▶ Playing…' : 'Playback failed', res?.status !== 'ok');
 }
 
 /* ── OTA ───────────────────────────────────────────── */

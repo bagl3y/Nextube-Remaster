@@ -293,6 +293,20 @@ __attribute__((unused)) static const char *weather_icon(const char *cond)
 
 /* ── Mode render helpers ────────────────────────────────────────────── */
 
+/* Custom Clock: shows the current date as DD  MM  YY across the 6 tubes.
+ * Example: 15 March 2026 → [1][5][0][3][2][6]
+ * This gives the user a dedicated date-display mode that is distinct from
+ * the standard clock (which always shows time). */
+static void render_date(const nextube_config_t *cfg, const struct tm *t)
+{
+    int d  = t->tm_mday;        /* 1-31  */
+    int mo = t->tm_mon + 1;     /* 1-12  */
+    int y  = t->tm_year % 100;  /* 0-99 (last two digits of year) */
+    int digits[6] = { d/10, d%10, mo/10, mo%10, y/10, y%10 };
+    for (int i = 0; i < 6; i++)
+        display_show_number(i, digits[i], cfg->theme);
+}
+
 static void render_clock(const nextube_config_t *cfg, const struct tm *t)
 {
     bool is_12h = (strcmp(cfg->time_type, "12H") == 0);
@@ -551,14 +565,27 @@ static void display_task(void *arg)
 
         switch (mode) {
 
-        case APP_MODE_CLOCK:
-        case APP_MODE_CUSTOM_CLOCK: {
+        case APP_MODE_CLOCK: {
             struct tm t; ntp_get_local(&t);
             if (first || mode_changed || theme_changed ||
                 t.tm_sec  != last_t.tm_sec  ||
                 t.tm_min  != last_t.tm_min  ||
                 t.tm_hour != last_t.tm_hour) {
                 render_clock(cfg, &t);
+                last_t = t;
+            }
+            break;
+        }
+
+        case APP_MODE_CUSTOM_CLOCK: {
+            /* Custom Clock shows date (DD/MM/YY); only needs re-render when the
+             * day changes, or on first draw / mode or theme switch. */
+            struct tm t; ntp_get_local(&t);
+            if (first || mode_changed || theme_changed ||
+                t.tm_mday != last_t.tm_mday ||
+                t.tm_mon  != last_t.tm_mon  ||
+                t.tm_year != last_t.tm_year) {
+                render_date(cfg, &t);
                 last_t = t;
             }
             break;

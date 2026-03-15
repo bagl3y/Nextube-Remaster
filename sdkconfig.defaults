@@ -54,6 +54,13 @@ CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 # mDNS
 CONFIG_MDNS_MAX_SERVICES=10
 
+# TLS / HTTPS
+# Enable the built-in Mozilla CA certificate bundle so esp_crt_bundle_attach()
+# works in the weather HTTP client.  Without this the bundle is empty and
+# esp-tls rejects the connection with "No server verification option set".
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
+
 # LWIP
 CONFIG_LWIP_MAX_SOCKETS=16
 
