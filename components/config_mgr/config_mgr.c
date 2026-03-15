@@ -269,8 +269,11 @@ char *config_to_json(void)
     cJSON_AddStringToObject(app0, "name", "app1");
 
     const char *mode_names[] = {"Clock","Countdown","Scoreboard","Pomodoro",
-                                "YouTube","CustomClock","Album"};
-    cJSON_AddStringToObject(app0, "app",   mode_names[s_cfg.current_mode]);
+                                "YouTube","CustomClock","Album","Weather"};
+    int mode_idx = (int)s_cfg.current_mode;
+    if (mode_idx < 0 || mode_idx >= (int)(sizeof(mode_names)/sizeof(mode_names[0])))
+        mode_idx = 0;
+    cJSON_AddStringToObject(app0, "app",   mode_names[mode_idx]);
     cJSON_AddStringToObject(app0, "theme", s_cfg.theme);
     cJSON_AddStringToObject(app0, "type",  s_cfg.time_type);
     cJSON_AddItemToArray(apps, app0);

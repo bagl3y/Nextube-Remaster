@@ -24,9 +24,7 @@
 static const char *TAG = "web_srv";
 static httpd_handle_t s_server = NULL;
 
-#ifndef FW_VERSION_STR
-#define FW_VERSION_STR "0.0.0"
-#endif
+#include "fw_version.h"
 #define HW_VER "1.31"
 
 static esp_err_t send_json(httpd_req_t *req, const char *json)

@@ -1,7 +1,9 @@
 #include "weather.h"
 #include "config_mgr.h"
+#include "fw_version.h"
 #include "esp_log.h"
 #include "esp_http_client.h"
+#include "esp_crt_bundle.h"
 #include "cJSON.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -16,21 +18,22 @@ static weather_data_t s_weather = {0};
  * Uses open/fetch_headers/read loop so chunked-encoded responses (no
  * Content-Length header) work correctly. Caller frees the returned buffer.
  * A descriptive User-Agent is sent with every request; this is required by
- * Met.no's terms of service and harmless to all other APIs. */
+ * Met.no's terms of service and harmless to all other APIs.
+ *
+ * crt_bundle_attach enables TLS certificate verification using the bundled
+ * Mozilla CA store.  Without it, all HTTPS requests fail the TLS handshake
+ * silently (wttr.in, Open-Meteo, Met.no are all HTTPS-only). */
 #define HTTP_MAX_BODY 4096
-
-#ifndef FW_VERSION_STR
-#define FW_VERSION_STR "0.0.0"
-#endif
 #define HTTP_USER_AGENT \
     "NextubeRemaster/" FW_VERSION_STR " github.com/MrToast99/Nextube-Remaster"
 
 static char *http_get(const char *url)
 {
     esp_http_client_config_t hcfg = {
-        .url        = url,
-        .timeout_ms = 10000,
-        .user_agent = HTTP_USER_AGENT,
+        .url               = url,
+        .timeout_ms        = 10000,
+        .user_agent        = HTTP_USER_AGENT,
+        .crt_bundle_attach = esp_crt_bundle_attach,
     };
     esp_http_client_handle_t c = esp_http_client_init(&hcfg);
     if (!c) return NULL;

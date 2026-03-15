@@ -133,9 +133,7 @@ static void init_nvs(void)
 /* ── Application entry ─────────────────────────────────────────────── */
 void app_main(void)
 {
-#ifndef FW_VERSION_STR
-#define FW_VERSION_STR "0.0.0"
-#endif
+#include "fw_version.h"
     /* Restart once after any hard reset so WiFi PHY initialises cleanly.
      * (See s_warm_boot comment above.) */
     if (esp_reset_reason() == ESP_RST_EXT && s_warm_boot != WARM_BOOT_MAGIC) {

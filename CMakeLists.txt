@@ -13,12 +13,22 @@ endif()
 # Write version into the SPIFFS web tree so the UI can detect mismatches at runtime
 file(WRITE "${CMAKE_CURRENT_SOURCE_DIR}/data/web/version.txt" "${FW_VERSION}")
 
-include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+# Generate fw_version.h into config_mgr's public include dir.
+# All components that need FW_VERSION_STR already REQUIRE config_mgr, so
+# this header is automatically on their include path without any CMakeLists
+# changes.  configure_file() runs at CMake configure time (before any
+# compilation), so the file always exists when the compiler is invoked.
+#
+# NOTE: idf_build_set_property(COMPILE_DEFINITIONS) requires __idf_build_target
+# which is only created inside project() / idf_build_init().  Calling it before
+# project() silently no-ops, which is why the previous approach produced 0.0.0.
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/main/fw_version.h.in"
+    "${CMAKE_CURRENT_SOURCE_DIR}/components/config_mgr/include/fw_version.h"
+    @ONLY
+)
 
-# Expose version string to all C translation units.
-# MUST be before project() – by the time project() runs, all component targets
-# are already configured, so any COMPILE_DEFINITIONS set afterwards are ignored.
-idf_build_set_property(COMPILE_DEFINITIONS "FW_VERSION_STR=\"${FW_VERSION}\"" APPEND)
+include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
 project(nextube-fw)
 
