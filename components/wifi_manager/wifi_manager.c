@@ -98,7 +98,6 @@ void wifi_manager_start(void)
     }
 
     ESP_ERROR_CHECK(esp_wifi_start());
-    init_ap_timers();
     start_mdns();
     ESP_LOGI(TAG, "WiFi AP+STA started. AP SSID: Nextube-Setup");
 }
