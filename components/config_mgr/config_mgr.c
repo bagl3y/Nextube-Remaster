@@ -132,9 +132,12 @@ static void parse_json(const char *json)
     json_read_str(root, "tone_file",        s_cfg.tone_file,       sizeof(s_cfg.tone_file));
     json_read_str(root, "timer_file",       s_cfg.timer_file,      sizeof(s_cfg.timer_file));
 
-    int tz = s_cfg.time_zone;
-    json_read_int(root, "time_zone", &tz);
-    s_cfg.time_zone = tz;
+    /* time_zone is stored in JSON as ±hours (e.g. -6), internally as seconds */
+    {
+        cJSON *tz_item = cJSON_GetObjectItem(root, "time_zone");
+        if (cJSON_IsNumber(tz_item))
+            s_cfg.time_zone = (int32_t)(tz_item->valuedouble * 3600.0);
+    }
 
     json_read_u8(root, "volume",         &s_cfg.volume);
     json_read_u8(root, "lcd_brightness", &s_cfg.lcd_brightness);
@@ -258,7 +261,8 @@ char *config_to_json(void)
     cJSON_AddStringToObject(root, "youtube_id",       s_cfg.youtube_id);
     cJSON_AddStringToObject(root, "youtube_key",      s_cfg.youtube_key);
     cJSON_AddStringToObject(root, "bili_uid",         s_cfg.bili_uid);
-    cJSON_AddNumberToObject(root, "time_zone",        s_cfg.time_zone);
+    /* Serialize as ±hours so the web UI shows human-readable values (e.g. -6, +5.5) */
+    cJSON_AddNumberToObject(root, "time_zone", s_cfg.time_zone / 3600.0);
     cJSON_AddStringToObject(root, "weather_api_key",  s_cfg.weather_api_key);
     cJSON_AddStringToObject(root, "City",             s_cfg.city);
     cJSON_AddStringToObject(root, "temperature_formate", s_cfg.temp_format);

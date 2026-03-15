@@ -99,6 +99,21 @@ void wifi_manager_start(void)
     ESP_LOGI(TAG, "WiFi AP+STA started. AP SSID: Nextube-Setup");
 }
 
+void wifi_manager_reconnect_sta(void)
+{
+    const nextube_config_t *cfg = config_get();
+    if (strlen(cfg->ssid) == 0) return;
+
+    wifi_config_t sta_cfg = {0};
+    strncpy((char *)sta_cfg.sta.ssid,     cfg->ssid,     sizeof(sta_cfg.sta.ssid)     - 1);
+    strncpy((char *)sta_cfg.sta.password, cfg->password, sizeof(sta_cfg.sta.password) - 1);
+
+    esp_wifi_disconnect();
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_cfg));
+    ESP_ERROR_CHECK(esp_wifi_connect());
+    ESP_LOGI(TAG, "STA: reconnecting to \"%s\"", cfg->ssid);
+}
+
 bool wifi_manager_is_connected(void)
 {
     return (xEventGroupGetBits(s_wifi_events) & WIFI_CONNECTED_BIT) != 0;

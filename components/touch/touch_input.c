@@ -10,11 +10,11 @@
  *   TOUCH_MIDDLE – GPIO 4  (touch pad channel 0)
  *   TOUCH_RIGHT  – GPIO 15 (touch pad channel 3)
  *
- * Strategy: continuous scanning is started at init time.  A polling task
- * reads the smooth data every 50 ms and fires the user callback on the
- * rising edge of a press.  Hardware thresholds are set to 0 (disabled)
- * so that no hardware interrupt fires; all detection is done in software
- * against a baseline calibrated at start-up (threshold = baseline × 2/3).
+ * Strategy: continuous scanning with software IIR filter.  A poll task
+ * (CPU 0, 50 ms) compares SMOOTH data against the hardware BENCHMARK
+ * (adaptive baseline) and fires a task-notification to a handler task on
+ * rising-edge press (smooth < benchmark × 80 %).  The handler calls the
+ * user callback, keeping the poll loop unblocked during flash writes.
  */
 
 #include "touch_input.h"
@@ -33,27 +33,72 @@ static const int touch_channels[] = { 2, 0, 3 };  /* pad IDs, not GPIO numbers *
 /* ── Driver state ───────────────────────────────────────────────────── */
 static touch_sensor_handle_t  s_sens = NULL;
 static touch_channel_handle_t s_chan[3] = { NULL, NULL, NULL };
-static uint32_t               s_thresholds[3] = { 0 };
 
 static touch_callback_t user_cb = NULL;
 static TaskHandle_t touch_task_handle = NULL;
 
 /* ── Poll task ──────────────────────────────────────────────────────── */
+/*
+ * Detection uses the hardware BENCHMARK (long-term baseline) rather than a
+ * one-shot startup calibration.  This prevents drift as the MCU warms up.
+ * A press is detected when smooth < benchmark * 80/100 (20 % drop required).
+ *
+ * Running on CPU 0 so JPEG decoding on CPU 1 (display task) cannot starve it.
+ *
+ * The user callback (which calls config_set_json / save_to_flash) is
+ * dispatched via a task notification to a separate handler task, keeping
+ * the 50 ms polling loop unblocked while flash writes occur.
+ */
+
+static TaskHandle_t s_handler_task = NULL;
+
+static void touch_handler_task(void *arg)
+{
+    while (1) {
+        uint32_t notif = 0;
+        if (xTaskNotifyWait(0, UINT32_MAX, &notif, portMAX_DELAY) == pdTRUE) {
+            if (user_cb) user_cb((touch_pad_id_t)notif);
+        }
+    }
+}
+
 static void touch_poll_task(void *arg)
 {
     bool was_pressed[3] = { false, false, false };
+    int  stuck_count[3] = { 0, 0, 0 };   /* detect stuck-pressed */
 
     while (1) {
         for (int i = 0; i < 3; i++) {
-            uint32_t val[1] = { 0 };
-            if (touch_channel_read_data(s_chan[i],
-                                        TOUCH_CHAN_DATA_TYPE_SMOOTH,
-                                        val) != ESP_OK) {
+            uint32_t smooth[1]    = { 0 };
+            uint32_t benchmark[1] = { 0 };
+
+            if (touch_channel_read_data(s_chan[i], TOUCH_CHAN_DATA_TYPE_SMOOTH,
+                                        smooth) != ESP_OK ||
+                touch_channel_read_data(s_chan[i], TOUCH_CHAN_DATA_TYPE_BENCHMARK,
+                                        benchmark) != ESP_OK) {
                 continue;
             }
-            bool pressed = (val[0] < s_thresholds[i]);
-            if (pressed && !was_pressed[i] && user_cb) {
-                user_cb((touch_pad_id_t)i);
+
+            /* Dynamic threshold: 20 % drop below long-term baseline */
+            uint32_t threshold = benchmark[0] * 80 / 100;
+            bool pressed = (smooth[0] < threshold);
+
+            if (pressed) {
+                stuck_count[i]++;
+                /* Force-release after 1 second of continuous press (20 × 50 ms)
+                 * to recover if the filter drifts or a write stalls detection. */
+                if (stuck_count[i] > 20) {
+                    was_pressed[i] = false;
+                    stuck_count[i] = 0;
+                }
+            } else {
+                stuck_count[i] = 0;
+            }
+
+            if (pressed && !was_pressed[i]) {
+                /* Dispatch to handler task so flash write doesn't block poll */
+                if (s_handler_task)
+                    xTaskNotify(s_handler_task, (uint32_t)i, eSetValueWithOverwrite);
             }
             was_pressed[i] = pressed;
         }
@@ -109,21 +154,27 @@ void touch_input_init(void)
     ESP_ERROR_CHECK(touch_sensor_enable(s_sens));
     ESP_ERROR_CHECK(touch_sensor_start_continuous_scanning(s_sens));
 
-    /* Allow sensor readings to settle */
-    vTaskDelay(pdMS_TO_TICKS(200));
+    /* Allow sensor readings and benchmark to settle */
+    vTaskDelay(pdMS_TO_TICKS(500));
 
-    /* ── Calibrate thresholds at ~66 % of idle baseline ── */
+    /* Log initial baselines (benchmark tracks drift automatically at runtime) */
     for (int i = 0; i < 3; i++) {
-        uint32_t val[1] = { 0 };
-        touch_channel_read_data(s_chan[i], TOUCH_CHAN_DATA_TYPE_SMOOTH, val);
-        s_thresholds[i] = val[0] * 2 / 3;
-        ESP_LOGI(TAG, "Touch%d (pad%d) baseline=%u threshold=%u",
-                 i, touch_channels[i], (unsigned)val[0],
-                 (unsigned)s_thresholds[i]);
+        uint32_t bm[1] = { 0 };
+        touch_channel_read_data(s_chan[i], TOUCH_CHAN_DATA_TYPE_BENCHMARK, bm);
+        ESP_LOGI(TAG, "Touch%d (pad%d) benchmark=%u threshold(80%%)=%u",
+                 i, touch_channels[i], (unsigned)bm[0],
+                 (unsigned)(bm[0] * 80 / 100));
     }
 
+    /* Handler task: receives notifications from poll task and calls user_cb.
+     * Keeps the 50 ms poll loop unblocked during slow flash writes.
+     * Pinned to CPU 0 where other app tasks live. */
+    xTaskCreatePinnedToCore(touch_handler_task, "touch_hdl", 3072, NULL,
+                            4, &s_handler_task, 0);
+
+    /* Poll task on CPU 0 – away from the display task's JPEG decoding on CPU 1 */
     xTaskCreatePinnedToCore(touch_poll_task, "touch", 2048, NULL,
-                            5, &touch_task_handle, 1);
+                            5, &touch_task_handle, 0);
 }
 
 void touch_input_register_callback(touch_callback_t cb) { user_cb = cb; }

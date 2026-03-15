@@ -51,7 +51,7 @@ main{padding:0 1rem 2rem}
 </head>
 <body>
 <header>
-  <h1>🕐 <span>Nextube</span> Manager</h1>
+  <h1>🕐 <span>Nextube-Remaster</span> Manager</h1>
   <div id="conn-status"><span class="status-dot err"></span>Connecting…</div>
 </header>
 
@@ -146,8 +146,8 @@ main{padding:0 1rem 2rem}
   </div>
   <div class="card">
     <h2>Time Zone</h2>
-    <div class="field"><label>UTC Offset (seconds, e.g. -21600 for UTC-6)</label>
-      <input id="f-tz" type="number">
+    <div class="field"><label>UTC Offset (hours, e.g. -6 for UTC-6, +5.5 for IST)</label>
+      <input id="f-tz" type="number" step="0.5">
     </div>
     <div class="field"><label>NTP Server</label><input id="f-ntp" type="text" value="pool.ntp.org"></div>
     <div class="btn-group"><button class="btn btn-primary" onclick="saveSettings()">Save</button></div>
@@ -268,7 +268,7 @@ async function loadSettings() {
   $('f-blmode').value = cfg.backlight_mode || 'Breath';
   $('f-ssid').value = cfg.ssid || '';
   $('f-pass').value = cfg.password || '';
-  $('f-tz').value = cfg.time_zone || -21600;
+  $('f-tz').value = cfg.time_zone !== undefined ? cfg.time_zone : -6;
   $('f-wkey').value = cfg.weather_api_key || '';
   $('f-city').value = cfg.City || '';
   $('f-tempfmt').value = cfg.temperature_formate || 'Celsius';

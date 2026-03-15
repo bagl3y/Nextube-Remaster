@@ -7,6 +7,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <string.h>
+#include <stdint.h>
 
 static const char *TAG = "display";
 static const int cs_pins[LCD_COUNT] = {
@@ -116,7 +117,7 @@ void display_fill(int tube, uint16_t color)
     for (int x = 0; x < LCD_WIDTH; x++) { line[x*2] = color>>8; line[x*2+1] = color&0xFF; }
     for (int y = 0; y < LCD_HEIGHT; y++) {
         spi_transaction_t t = { .length = sizeof(line)*8, .tx_buffer = line };
-        spi_device_polling_transmit(spi_dev, &t);
+        spi_device_transmit(spi_dev, &t);
     }
     deselect_all();
 }
@@ -129,8 +130,10 @@ void display_show_digit(int tube, const uint8_t *data, int w, int h)
     lcd_cmd(0x2B); uint8_t ra[] = {0,LCD_OFFSET_Y,0,LCD_OFFSET_Y+h-1}; lcd_data(ra,4);
     lcd_cmd(0x2C);
     gpio_set_level(PIN_LCD_DC, 1);
+    /* Use interrupt-based transmit so the task yields during DMA, allowing
+     * IDLE1 on CPU1 to reset the task watchdog. */
     spi_transaction_t t = { .length = w*h*2*8, .tx_buffer = data };
-    spi_device_polling_transmit(spi_dev, &t);
+    spi_device_transmit(spi_dev, &t);
     deselect_all();
 }
 
@@ -455,6 +458,7 @@ static void display_task(void *arg)
     app_mode_t    last_mode    = (app_mode_t)-1;
     char          last_theme[32] = {0};
     uint32_t      last_subs    = UINT32_MAX;
+    int32_t       last_remain_s = INT32_MAX;  /* countdown/pomodoro change detection */
     TickType_t    album_switch = 0;
     bool          first        = true;
 
@@ -467,8 +471,9 @@ static void display_task(void *arg)
         bool theme_changed = (strcmp(cfg->theme, last_theme) != 0);
 
         if (mode_changed || theme_changed || first) {
-            /* Reset album on mode/theme switch */
+            /* Reset album and timer state on mode/theme switch */
             s_album_loaded = false; s_album_index = 0; album_switch = 0;
+            last_remain_s  = INT32_MAX;
             display_timer_reset();
         }
 
@@ -491,9 +496,13 @@ static void display_task(void *arg)
             xSemaphoreTake(s_timer_mutex, portMAX_DELAY);
             int32_t elapsed = (int32_t)pdTICKS_TO_MS(xTaskGetTickCount() - s_timer_start) / 1000;
             xSemaphoreGive(s_timer_mutex);
-            int32_t total   = (int32_t)cfg->countdown_minutes * 60;
-            int32_t remain  = total - elapsed;
-            render_countdown_display(cfg, remain);
+            int32_t total  = (int32_t)cfg->countdown_minutes * 60;
+            int32_t remain = total - elapsed;
+            if (remain < 0) remain = 0;
+            if (first || mode_changed || theme_changed || remain != last_remain_s) {
+                render_countdown_display(cfg, remain);
+                last_remain_s = remain;
+            }
             break;
         }
 
@@ -503,9 +512,9 @@ static void display_task(void *arg)
             bool in_break   = s_pomo_in_break;
             xSemaphoreGive(s_timer_mutex);
 
-            int32_t period  = in_break ? (int32_t)cfg->pomodoro_break * 60
-                                       : (int32_t)cfg->pomodoro_work  * 60;
-            int32_t remain  = period - elapsed;
+            int32_t period = in_break ? (int32_t)cfg->pomodoro_break * 60
+                                      : (int32_t)cfg->pomodoro_work  * 60;
+            int32_t remain = period - elapsed;
             if (remain <= 0) {
                 /* Flip work/break */
                 xSemaphoreTake(s_timer_mutex, portMAX_DELAY);
@@ -516,7 +525,10 @@ static void display_task(void *arg)
                 remain = in_break ? (int32_t)cfg->pomodoro_break * 60
                                   : (int32_t)cfg->pomodoro_work  * 60;
             }
-            render_pomodoro_display(cfg, remain, in_break);
+            if (first || mode_changed || theme_changed || remain != last_remain_s) {
+                render_pomodoro_display(cfg, remain, in_break);
+                last_remain_s = remain;
+            }
             break;
         }
 

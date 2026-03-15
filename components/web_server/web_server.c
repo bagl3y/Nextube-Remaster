@@ -57,7 +57,8 @@ static esp_err_t api_post_settings(httpd_req_t *r)
     const nextube_config_t *cfg = config_get();
     display_set_brightness(cfg->lcd_brightness);
     { uint8_t b = cfg->led_brightness; leds_set_brightness(b <= 100 ? 100 - b : 0); }
-    ntp_apply_timezone();   /* re-apply TZ immediately so clock updates without reboot */
+    ntp_apply_timezone();          /* re-apply TZ immediately so clock updates without reboot */
+    wifi_manager_reconnect_sta();  /* apply new SSID/password without reboot */
     return send_json(r, ok ? "{\"status\":\"ok\"}" : "{\"status\":\"error\"}");
 }
 
