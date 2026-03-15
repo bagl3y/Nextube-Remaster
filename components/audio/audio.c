@@ -2,7 +2,7 @@
  * @file audio.c
  * @brief Nextube audio driver – WAV file playback via I2S built-in DAC
  *
- * Hardware: GPIO25 → LTK8002D amplifier (DAC_CHANNEL_1 / I2S_DAC_CHANNEL_RIGHT_EN).
+ * Hardware: GPIO25 → LTK8002D amplifier (DAC_CHAN_0 / I2S_DAC_CHANNEL_RIGHT_EN).
  *
  * Supports standard PCM WAV files (8-bit or 16-bit, mono or stereo).
  * MP3 files are logged but skipped – the built-in DAC requires raw PCM.
@@ -86,7 +86,7 @@ static void i2s_dac_deinit(void)
     i2s_zero_dma_buffer(I2S_PORT);
     i2s_driver_uninstall(I2S_PORT);
     /* Leave DAC output at mid-rail to avoid click/pop */
-    dac_output_voltage(DAC_CHANNEL_1, 128);
+    dac_output_voltage(DAC_CHAN_0, 128);
 }
 
 /* ── Volume scaling ─────────────────────────────────────────────────── */
@@ -219,8 +219,8 @@ task_exit:
 void audio_init(void)
 {
     ESP_LOGI(TAG, "Audio init – DAC GPIO%d", PIN_AUDIO_DAC);
-    dac_output_enable(DAC_CHANNEL_1);
-    dac_output_voltage(DAC_CHANNEL_1, 128);   /* silence */
+    dac_output_enable(DAC_CHAN_0);
+    dac_output_voltage(DAC_CHAN_0, 128);   /* silence */
     s_play_mutex = xSemaphoreCreateMutex();
 }
 
@@ -280,5 +280,5 @@ void audio_stop(void)
         vTaskDelay(pdMS_TO_TICKS(10));
     }
     /* Guarantee silence on DAC output */
-    dac_output_voltage(DAC_CHANNEL_1, 128);
+    dac_output_voltage(DAC_CHAN_0, 128);
 }
