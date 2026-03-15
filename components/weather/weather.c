@@ -1,5 +1,6 @@
 #include "weather.h"
 #include "config_mgr.h"
+#include "wifi_manager.h"
 #include "fw_version.h"
 #include "esp_log.h"
 #include "esp_http_client.h"
@@ -474,7 +475,19 @@ static void fetch_weather(void)
 
 static void weather_task(void *arg)
 {
-    vTaskDelay(pdMS_TO_TICKS(15000));   /* wait for WiFi */
+    /* Wait until STA actually has an IP before attempting any HTTPS connection.
+     * A fixed 15 s delay from boot was wrong: if WiFi takes longer to connect
+     * (e.g. 112 s in the field), the first fetch failed silently, then the
+     * 10-minute retry fired exactly when the user opened the web UI – flooding
+     * the WiFi TX queue with TLS handshake traffic and causing EAGAIN on every
+     * concurrent HTTP send. */
+    while (!wifi_manager_is_connected()) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+    /* Extra settling time so the web UI can finish its initial API calls before
+     * TLS crypto spikes the CPU and competes for WiFi TX buffers. */
+    vTaskDelay(pdMS_TO_TICKS(10000));   /* 10 s after WiFi ready */
+
     while (1) {
         fetch_weather();
         vTaskDelay(pdMS_TO_TICKS(600000));  /* every 10 minutes */
