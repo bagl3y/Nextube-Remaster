@@ -455,9 +455,12 @@ static void render_album(const nextube_config_t *cfg,
 /* ── Weather mode ───────────────────────────────────────────────────── */
 /*
  * Layout: [TT][TT][unit][HH][HH][icon]
- *   tubes 0-1 : temperature – positive: tens/ones; negative: "minus" + abs digit
- *   tube  2   : unit icon → MutiInfo/Temperature/degreec.jpg or degreef.jpg
- *   tubes 3-4 : humidity integer (00-99)
+ *   Layout (see render_weather() for full table):
+ *     positive              : [t/blank][units][C/F][h/blank][hum][icon]
+ *     negative single-digit : [-][units][C/F][blank][blank][icon]
+ *     negative double-digit : [-][tens][units][C/F][blank][icon]
+ *   Leading zeros are blank.  Negative temps suppress humidity entirely.
+ *   Unit: Temperature/c.jpg or f.jpg (letter only; auto-blanks if absent)
  *   tube  5   : weather icon from MutiInfo/Weather/{icon}.jpg
  *
  * Actual SPIFFS filenames (must match exactly):
@@ -488,33 +491,78 @@ static void render_weather(const nextube_config_t *cfg)
     if (hum < 0)  hum = 0;
     if (hum > 99) hum = 99;
 
-    /* Tube 0-1: temperature digits (or minus sign + digit for sub-zero) */
-    if (negative) {
-        display_path_temperature(path, sizeof(path), cfg->theme, "minus");
-        display_show_image(0, path);
-        display_path_number(path, sizeof(path), cfg->theme, temp > 9 ? temp / 10 : temp);
-        display_show_image(1, path);
-    } else {
-        display_path_number(path, sizeof(path), cfg->theme, temp / 10);
-        display_show_image(0, path);
+    /* Tube layout:
+     *
+     *  Positive (0–99°): leading zero is BLANK, humidity leading zero is BLANK
+     *    [t/blank][units][C/F][h/blank][hum units][icon]
+     *    e.g. 2°C 92%:   _  2  C  9  2  ☁
+     *    e.g. 15°C 8%:   1  5  C  _  8  ☁
+     *
+     *  Negative single-digit (-1 to -9°): no humidity shown
+     *    [-][units][C/F][ _ ][ _ ][icon]
+     *    e.g. -7°C:  -  7  C  _  _  ☁
+     *
+     *  Negative double-digit (-10 to -99°): no humidity shown
+     *    [-][tens][units][C/F][ _ ][icon]
+     *    e.g. -23°C:  -  2  3  C  _  ☁
+     *
+     * Unit symbol: loaded from Temperature/c.jpg or f.jpg (letter only,
+     * no degree circle).  display_show_image() blanks the tube automatically
+     * if the file is missing — add c.jpg/f.jpg to your SPIFFS theme to show
+     * the letter.
+     */
+    const char *unit = (strncmp(cfg->temp_format, "Fahrenheit", 10) == 0)
+                           ? "f" : "c";
+    const char *icon = (w->icon[0] != '\0') ? w->icon : "sun";
+
+    if (!negative) {
+        /* Tube 0: temperature tens — blank if zero (no leading zero) */
+        if (temp / 10 == 0) {
+            display_fill(0, 0x0000);
+        } else {
+            display_path_number(path, sizeof(path), cfg->theme, temp / 10);
+            display_show_image(0, path);
+        }
+        /* Tube 1: temperature units */
         display_path_number(path, sizeof(path), cfg->theme, temp % 10);
         display_show_image(1, path);
+        /* Tube 2: unit letter (c.jpg / f.jpg) — auto-blanks if file absent */
+        display_path_temperature(path, sizeof(path), cfg->theme, unit);
+        display_show_image(2, path);
+        /* Tube 3: humidity tens — blank if zero */
+        if (hum / 10 == 0) {
+            display_fill(3, 0x0000);
+        } else {
+            display_path_number(path, sizeof(path), cfg->theme, hum / 10);
+            display_show_image(3, path);
+        }
+        /* Tube 4: humidity units */
+        display_path_number(path, sizeof(path), cfg->theme, hum % 10);
+        display_show_image(4, path);
+    } else if (temp <= 9) {
+        /* Single-digit negative: [-][digit][C/F][blank][blank][icon] */
+        display_path_temperature(path, sizeof(path), cfg->theme, "minus");
+        display_show_image(0, path);
+        display_path_number(path, sizeof(path), cfg->theme, temp);
+        display_show_image(1, path);
+        display_path_temperature(path, sizeof(path), cfg->theme, unit);
+        display_show_image(2, path);
+        display_fill(3, 0x0000);
+        display_fill(4, 0x0000);
+    } else {
+        /* Double-digit negative: [-][tens][units][C/F][blank][icon] */
+        display_path_temperature(path, sizeof(path), cfg->theme, "minus");
+        display_show_image(0, path);
+        display_path_number(path, sizeof(path), cfg->theme, temp / 10);
+        display_show_image(1, path);
+        display_path_number(path, sizeof(path), cfg->theme, temp % 10);
+        display_show_image(2, path);
+        display_path_temperature(path, sizeof(path), cfg->theme, unit);
+        display_show_image(3, path);
+        display_fill(4, 0x0000);
     }
 
-    /* Tube 2: °C / °F unit – filenames are "degreec" and "degreef" */
-    const char *unit = (strncmp(cfg->temp_format, "Fahrenheit", 10) == 0)
-                           ? "degreef" : "degreec";
-    display_path_temperature(path, sizeof(path), cfg->theme, unit);
-    display_show_image(2, path);
-
-    /* Tube 3-4: humidity digits */
-    display_path_number(path, sizeof(path), cfg->theme, hum / 10);
-    display_show_image(3, path);
-    display_path_number(path, sizeof(path), cfg->theme, hum % 10);
-    display_show_image(4, path);
-
-    /* Tube 5: weather icon – default "sun" matches the SPIFFS filename */
-    const char *icon = (w->icon[0] != '\0') ? w->icon : "sun";
+    /* Tube 5: weather icon */
     display_path_weather(path, sizeof(path), cfg->theme, icon);
     display_show_image(5, path);
 }
