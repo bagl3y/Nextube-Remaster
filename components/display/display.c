@@ -261,7 +261,7 @@ void display_show_time(int h, int m, int s, const char *theme)
 #include "freertos/semphr.h"
 
 /* Map OpenWeatherMap "main" condition string → asset filename */
-static const char * __attribute__((unused)) weather_icon(const char *cond)
+__attribute__((unused)) static const char *weather_icon(const char *cond)
 {
     if (!cond || !*cond) return "sun";
     if      (strcasecmp(cond, "Clear")       == 0) return "sun";

@@ -1,21 +1,31 @@
 /**
  * @file audio.c
- * @brief Nextube audio driver – WAV file playback via I2S built-in DAC
+ * @brief Nextube audio driver – WAV file playback via DAC continuous driver.
  *
- * Hardware: GPIO25 → LTK8002D amplifier (DAC_CHAN_0 / I2S_DAC_CHANNEL_RIGHT_EN).
+ * Hardware: GPIO25 → LTK8002D amplifier (DAC_CHAN_0).
+ *
+ * Uses the IDF 5.x dac_continuous driver (driver/dac_continuous.h) to replace
+ * the legacy I2S-built-in-DAC path (driver/i2s.h + driver/dac.h).
  *
  * Supports standard PCM WAV files (8-bit or 16-bit, mono or stereo).
- * MP3 files are logged but skipped – the built-in DAC requires raw PCM.
+ * 16-bit signed samples are down-converted to 8-bit unsigned before writing
+ * to the DAC (the DAC is 8-bit; the continuous driver always accepts uint8_t).
+ * MP3 files are logged but skipped – the DAC requires raw PCM.
  *
  * Playback runs in a dedicated FreeRTOS task so audio_play_file() returns
  * immediately.  A mutex serialises concurrent play requests.
+ *
+ * DAC mode lifecycle:
+ *   idle    – oneshot channel holds DAC at 128 (mid-rail = silence)
+ *   playing – oneshot deleted, continuous channel streams PCM samples;
+ *             on completion oneshot is re-created and restored to 128.
  */
 
 #include "audio.h"
 #include "board_pins.h"
 #include "esp_log.h"
-#include "driver/i2s.h"
-#include "driver/dac.h"
+#include "driver/dac_continuous.h"
+#include "driver/dac_oneshot.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -27,16 +37,19 @@
 static const char *TAG = "audio";
 
 /* ── Runtime state ─────────────────────────────────────────────────── */
-static int               s_volume     = 20;
-static volatile bool     s_stop_flag  = false;
-static TaskHandle_t      s_audio_task = NULL;
-static SemaphoreHandle_t s_play_mutex = NULL;
+static int               s_volume      = 20;
+static volatile bool     s_stop_flag   = false;
+static TaskHandle_t      s_audio_task  = NULL;
+static SemaphoreHandle_t s_play_mutex  = NULL;
 
-/* ── I2S configuration ─────────────────────────────────────────────── */
-#define I2S_PORT        I2S_NUM_0
-#define DMA_BUF_COUNT   8
-#define DMA_BUF_LEN     512     /* samples per DMA buffer */
-#define STREAM_BUF_BYTES 4096   /* file read chunk size   */
+/* DAC handles – only one is active at a time */
+static dac_continuous_handle_t s_dac_cont = NULL;   /* during playback  */
+static dac_oneshot_handle_t    s_dac_one  = NULL;   /* during idle      */
+
+/* ── Buffer / DMA sizes ─────────────────────────────────────────────── */
+#define STREAM_BUF_BYTES   4096   /* file read chunk; also 8-bit output buf */
+#define DAC_DESC_NUM          8   /* DMA descriptor count                   */
+#define DAC_DMA_BUF_SIZE   2048   /* bytes per DMA descriptor               */
 
 /* ── WAV RIFF header (44 bytes, little-endian) ─────────────────────── */
 typedef struct __attribute__((packed)) {
@@ -48,51 +61,80 @@ typedef struct __attribute__((packed)) {
     uint16_t audio_format;      /* 1 = PCM            */
     uint16_t num_channels;      /* 1 or 2             */
     uint32_t sample_rate;       /* e.g. 44100         */
-    uint32_t byte_rate;         /* sample_rate * block_align */
-    uint16_t block_align;       /* channels * bits/8  */
+    uint32_t byte_rate;
+    uint16_t block_align;
     uint16_t bits_per_sample;   /* 8 or 16            */
 } wav_riff_hdr_t;
 
-/* ── I2S / DAC lifecycle ────────────────────────────────────────────── */
-static esp_err_t i2s_dac_init(uint32_t sample_rate, uint16_t bits)
+/* ── DAC lifecycle helpers ──────────────────────────────────────────── */
+
+/*
+ * Transition from idle (oneshot) to continuous mode for streaming.
+ * Oneshot and continuous channels cannot coexist on the same DAC output.
+ */
+static esp_err_t dac_cont_start(uint32_t sample_rate)
 {
-    i2s_config_t cfg = {
-        .mode                 = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX |
-                                             I2S_MODE_DAC_BUILT_IN),
-        .sample_rate          = sample_rate,
-        .bits_per_sample      = (bits == 8) ? I2S_BITS_PER_SAMPLE_8BIT
-                                            : I2S_BITS_PER_SAMPLE_16BIT,
-        .channel_format       = I2S_CHANNEL_FMT_RIGHT_LEFT,
-        .communication_format = I2S_COMM_FORMAT_STAND_MSB,
-        .dma_buf_count        = DMA_BUF_COUNT,
-        .dma_buf_len          = DMA_BUF_LEN,
-        .use_apll             = false,
-        .tx_desc_auto_clear   = true,
-        .intr_alloc_flags     = 0,
+    /* Release oneshot so continuous can claim the channel */
+    if (s_dac_one) {
+        dac_oneshot_del_channel(s_dac_one);
+        s_dac_one = NULL;
+    }
+
+    dac_continuous_config_t cfg = {
+        .chan_mask = DAC_CHANNEL_MASK_CH0,
+        .desc_num  = DAC_DESC_NUM,
+        .buf_size  = DAC_DMA_BUF_SIZE,
+        .freq_hz   = sample_rate,
+        .clk_src   = DAC_DIGI_CLK_SRC_DEFAULT,
+        .chan_mode  = DAC_CHANNEL_MODE_SIMUL,
     };
-    esp_err_t err = i2s_driver_install(I2S_PORT, &cfg, 0, NULL);
+    esp_err_t err = dac_continuous_new_channels(&cfg, &s_dac_cont);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "i2s_driver_install: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "dac_continuous_new_channels: %s", esp_err_to_name(err));
+        /* Reclaim oneshot so idle silence is restored */
+        dac_oneshot_config_t one_cfg = { .chan_id = DAC_CHAN_0 };
+        if (dac_oneshot_new_channel(&one_cfg, &s_dac_one) == ESP_OK)
+            dac_oneshot_output_voltage(s_dac_one, 128);
         return err;
     }
-    /* Route I2S right channel to DAC1 (GPIO25) */
-    i2s_set_dac_mode(I2S_DAC_CHANNEL_RIGHT_EN);
-    i2s_zero_dma_buffer(I2S_PORT);
-    return ESP_OK;
+
+    err = dac_continuous_enable(s_dac_cont);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "dac_continuous_enable: %s", esp_err_to_name(err));
+        dac_continuous_del_channels(s_dac_cont);
+        s_dac_cont = NULL;
+        dac_oneshot_config_t one_cfg = { .chan_id = DAC_CHAN_0 };
+        if (dac_oneshot_new_channel(&one_cfg, &s_dac_one) == ESP_OK)
+            dac_oneshot_output_voltage(s_dac_one, 128);
+    }
+    return err;
 }
 
-static void i2s_dac_deinit(void)
+/*
+ * Transition from continuous mode back to idle (oneshot), leaving DAC
+ * at mid-rail (128) to prevent audible clicks or pops.
+ */
+static void dac_cont_stop(void)
 {
-    i2s_zero_dma_buffer(I2S_PORT);
-    i2s_driver_uninstall(I2S_PORT);
-    /* Leave DAC output at mid-rail to avoid click/pop */
-    dac_output_voltage(DAC_CHAN_0, 128);
+    if (s_dac_cont) {
+        dac_continuous_disable(s_dac_cont);
+        dac_continuous_del_channels(s_dac_cont);
+        s_dac_cont = NULL;
+    }
+
+    /* Restore oneshot and set DAC to silence */
+    if (!s_dac_one) {
+        dac_oneshot_config_t one_cfg = { .chan_id = DAC_CHAN_0 };
+        if (dac_oneshot_new_channel(&one_cfg, &s_dac_one) == ESP_OK)
+            dac_oneshot_output_voltage(s_dac_one, 128);
+    }
 }
 
 /* ── Volume scaling ─────────────────────────────────────────────────── */
 /*
- * In-place volume attenuation.
- * 16-bit samples are signed; 8-bit WAV samples are unsigned (centre = 128).
+ * In-place volume attenuation applied before bit-depth conversion.
+ * 16-bit: samples are signed (centre = 0).
+ * 8-bit:  samples are unsigned (centre = 128).
  */
 static void apply_volume(uint8_t *buf, int len_bytes,
                          uint16_t bits_per_sample, int vol_pct)
@@ -103,15 +145,26 @@ static void apply_volume(uint8_t *buf, int len_bytes,
     if (bits_per_sample == 16) {
         int16_t *s = (int16_t *)(void *)buf;
         int      n = len_bytes / 2;
-        for (int i = 0; i < n; i++) {
+        for (int i = 0; i < n; i++)
             s[i] = (int16_t)((float)s[i] * scale);
-        }
     } else {
-        /* 8-bit unsigned PCM */
-        for (int i = 0; i < len_bytes; i++) {
+        for (int i = 0; i < len_bytes; i++)
             buf[i] = (uint8_t)(128 + (int)(((int)buf[i] - 128) * scale));
-        }
     }
+}
+
+/*
+ * Convert 16-bit signed PCM to 8-bit unsigned PCM in-place.
+ * Works by taking the high byte and re-centering: val = (s16 >> 8) + 128.
+ * Returns the number of 8-bit output bytes produced (= len_bytes / 2).
+ */
+static int pcm16_to_pcm8(uint8_t *buf, int len_bytes)
+{
+    int16_t *s16    = (int16_t *)(void *)buf;
+    int      samples = len_bytes / 2;
+    for (int i = 0; i < samples; i++)
+        buf[i] = (uint8_t)((s16[i] >> 8) + 128);
+    return samples;
 }
 
 /* ── Playback task ──────────────────────────────────────────────────── */
@@ -124,6 +177,8 @@ static void audio_play_task(void *arg)
     strncpy(path, a->path, sizeof(path) - 1);
     path[sizeof(path) - 1] = '\0';
     free(a);
+
+    uint8_t *buf = NULL;
 
     /* ── Open file ── */
     FILE *f = fopen(path, "r");
@@ -149,60 +204,63 @@ static void audio_play_task(void *arg)
     }
 
     /* ── Find the 'data' sub-chunk (skip 'LIST', 'fact', etc.) ── */
-    /*
-     * Position just after the fixed fmt chunk (12 bytes RIFF+size+WAVE,
-     * then 8 bytes chunk header + fmt_size bytes fmt body).
-     */
-    long data_start = -1;
-    fseek(f, 12, SEEK_SET);   /* skip RIFF/WAVE preamble */
-    while (!feof(f)) {
-        char     cid[4];
-        uint32_t csz;
-        if (fread(cid, 1, 4, f) < 4) break;
-        if (fread(&csz, 1, 4, f) < 4) break;
-        if (memcmp(cid, "data", 4) == 0) {
-            data_start = ftell(f);
-            break;
+    {
+        long data_start = -1;
+        fseek(f, 12, SEEK_SET);   /* skip RIFF/WAVE preamble */
+        while (!feof(f)) {
+            char     cid[4];
+            uint32_t csz;
+            if (fread(cid, 1, 4, f) < 4) break;
+            if (fread(&csz, 1, 4, f) < 4) break;
+            if (memcmp(cid, "data", 4) == 0) {
+                data_start = ftell(f);
+                break;
+            }
+            fseek(f, (long)(csz + (csz & 1)), SEEK_CUR);
         }
-        /* Skip non-data chunk (word-aligned) */
-        fseek(f, (long)(csz + (csz & 1)), SEEK_CUR);
+        if (data_start < 0) {
+            ESP_LOGE(TAG, "No 'data' chunk in: %s", path);
+            goto task_close;
+        }
+        fseek(f, data_start, SEEK_SET);
     }
-    if (data_start < 0) {
-        ESP_LOGE(TAG, "No 'data' chunk found in: %s", path);
-        goto task_close;
-    }
-    fseek(f, data_start, SEEK_SET);
 
     ESP_LOGI(TAG, "WAV play: %s  %u Hz  %u ch  %u-bit  vol=%d%%",
              path, (unsigned)hdr.sample_rate, hdr.num_channels,
              hdr.bits_per_sample, s_volume);
 
-    /* ── Configure I2S/DAC ── */
-    if (i2s_dac_init(hdr.sample_rate, hdr.bits_per_sample) != ESP_OK)
+    /* ── Start DAC continuous at the file's sample rate ── */
+    if (dac_cont_start(hdr.sample_rate) != ESP_OK)
         goto task_close;
 
-    /* ── Stream PCM data ── */
-    uint8_t *buf = (uint8_t *)malloc(STREAM_BUF_BYTES);
+    /* ── Allocate stream buffer ── */
+    buf = (uint8_t *)malloc(STREAM_BUF_BYTES);
     if (!buf) {
         ESP_LOGE(TAG, "OOM for audio stream buffer");
-        i2s_dac_deinit();
-        goto task_close;
+        goto task_cleanup;
     }
 
+    /* ── Stream PCM data ── */
     while (!s_stop_flag) {
         int rd = fread(buf, 1, STREAM_BUF_BYTES, f);
         if (rd <= 0) break;
 
+        /* Volume attenuation (operates on native bit depth) */
         apply_volume(buf, rd, hdr.bits_per_sample, s_volume);
 
+        /* DAC continuous only accepts 8-bit unsigned PCM */
+        int out_bytes = rd;
+        if (hdr.bits_per_sample == 16)
+            out_bytes = pcm16_to_pcm8(buf, rd);
+
         size_t written = 0;
-        /* i2s_write blocks until DMA accepts the data */
-        i2s_write(I2S_PORT, buf, (size_t)rd, &written,
-                  pdMS_TO_TICKS(1000));
+        dac_continuous_write(s_dac_cont, buf, (size_t)out_bytes,
+                             &written, pdMS_TO_TICKS(1000));
     }
 
+task_cleanup:
     free(buf);
-    i2s_dac_deinit();
+    dac_cont_stop();   /* disable continuous, restore oneshot silence */
 
 task_close:
     fclose(f);
@@ -219,8 +277,12 @@ task_exit:
 void audio_init(void)
 {
     ESP_LOGI(TAG, "Audio init – DAC GPIO%d", PIN_AUDIO_DAC);
-    dac_output_enable(DAC_CHAN_0);
-    dac_output_voltage(DAC_CHAN_0, 128);   /* silence */
+
+    /* Start in oneshot mode so we can set an idle DC level (silence) */
+    dac_oneshot_config_t one_cfg = { .chan_id = DAC_CHAN_0 };
+    ESP_ERROR_CHECK(dac_oneshot_new_channel(&one_cfg, &s_dac_one));
+    dac_oneshot_output_voltage(s_dac_one, 128);   /* mid-rail = silence */
+
     s_play_mutex = xSemaphoreCreateMutex();
 }
 
@@ -239,7 +301,7 @@ void audio_play_file(const char *path)
     /* Stop any running playback first */
     audio_stop();
 
-    /* Acquire play lock (previous task releases it on exit) */
+    /* Acquire play lock (playback task releases it on exit) */
     if (xSemaphoreTake(s_play_mutex, pdMS_TO_TICKS(300)) != pdTRUE) {
         ESP_LOGW(TAG, "audio busy – play request dropped");
         return;
@@ -275,10 +337,10 @@ void audio_set_volume(int vol)
 void audio_stop(void)
 {
     s_stop_flag = true;
-    /* Poll briefly for task to finish (it gives the mutex on exit) */
-    for (int i = 0; i < 30 && s_audio_task != NULL; i++) {
+    /* Poll briefly for playback task to finish (it gives the mutex on exit) */
+    for (int i = 0; i < 30 && s_audio_task != NULL; i++)
         vTaskDelay(pdMS_TO_TICKS(10));
-    }
     /* Guarantee silence on DAC output */
-    dac_output_voltage(DAC_CHAN_0, 128);
+    if (s_dac_one)
+        dac_oneshot_output_voltage(s_dac_one, 128);
 }

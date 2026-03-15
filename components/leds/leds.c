@@ -1,7 +1,21 @@
+/**
+ * @file leds.c
+ * @brief WS2812 LED driver – uses IDF 5.x RMT TX + bytes encoder API.
+ *
+ * Replaces the legacy driver/rmt.h API with driver/rmt_tx.h +
+ * driver/rmt_encoder.h (new in IDF 5.0).
+ *
+ * Timing at 10 MHz resolution (100 ns / tick):
+ *   bit-0: T0H = 4 ticks (400 ns), T0L = 9 ticks (900 ns)
+ *   bit-1: T1H = 8 ticks (800 ns), T1L = 5 ticks (500 ns)
+ * WS2812 bit order: MSB first, colour order: G R B per pixel.
+ */
+
 #include "leds.h"
 #include "board_pins.h"
 #include "esp_log.h"
-#include "driver/rmt.h"
+#include "driver/rmt_tx.h"
+#include "driver/rmt_encoder.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <string.h>
@@ -9,45 +23,74 @@
 
 static const char *TAG = "leds";
 
-static uint8_t led_data[LED_COUNT][3];  /* GRB */
+/* GRB pixel buffer (WS2812 colour order) */
+static uint8_t led_data[LED_COUNT][3];  /* [G, R, B] */
 static uint8_t brightness = 60;
-static TaskHandle_t led_task_handle = NULL;
 
-/* RMT-based WS2812 driver */
-static rmt_channel_t rmt_ch = RMT_CHANNEL_0;
+/* ── RMT handles ────────────────────────────────────────────────────── */
+#define RMT_LED_RESOLUTION_HZ  10000000   /* 10 MHz → 100 ns / tick */
 
+static rmt_channel_handle_t s_rmt_chan  = NULL;
+static rmt_encoder_handle_t s_bytes_enc = NULL;
+
+/* ── Internal transmit ──────────────────────────────────────────────── */
 static void ws2812_write(void)
 {
-    /* Simplified: real implementation uses RMT items for WS2812 timing.
-       Each bit: T0H=0.4us T0L=0.85us, T1H=0.8us T1L=0.45us */
-    rmt_item32_t items[LED_COUNT * 24];
-    int idx = 0;
-    for (int led = 0; led < LED_COUNT; led++) {
-        for (int c = 0; c < 3; c++) {
-            uint8_t val = (led_data[led][c] * brightness) / 100;
-            for (int bit = 7; bit >= 0; bit--) {
-                if (val & (1 << bit)) {
-                    items[idx].duration0 = 16;  items[idx].level0 = 1;
-                    items[idx].duration1 = 9;   items[idx].level1 = 0;
-                } else {
-                    items[idx].duration0 = 8;   items[idx].level0 = 1;
-                    items[idx].duration1 = 17;  items[idx].level1 = 0;
-                }
-                idx++;
-            }
-        }
+    /* Build flat GRB byte array with brightness scaling */
+    uint8_t grb[LED_COUNT * 3];
+    for (int i = 0; i < LED_COUNT; i++) {
+        grb[i * 3 + 0] = (led_data[i][0] * brightness) / 100;  /* G */
+        grb[i * 3 + 1] = (led_data[i][1] * brightness) / 100;  /* R */
+        grb[i * 3 + 2] = (led_data[i][2] * brightness) / 100;  /* B */
     }
-    rmt_write_items(rmt_ch, items, idx, true);
+
+    rmt_transmit_config_t tx_cfg = {
+        .loop_count      = 0,          /* transmit once */
+        .flags.eot_level = 0,          /* line held low after tx = WS2812 reset */
+    };
+    ESP_ERROR_CHECK(rmt_transmit(s_rmt_chan, s_bytes_enc,
+                                 grb, sizeof(grb), &tx_cfg));
+    /* Block until the frame is fully clocked out */
+    ESP_ERROR_CHECK(rmt_tx_wait_all_done(s_rmt_chan, pdMS_TO_TICKS(100)));
 }
+
+/* ════════════════════════════════════════════════════════════════════ */
+/*  Public API                                                          */
+/* ════════════════════════════════════════════════════════════════════ */
 
 void leds_init(void)
 {
-    ESP_LOGI(TAG, "Initialising WS2812 LEDs on GPIO%d", PIN_LED_DATA);
+    ESP_LOGI(TAG, "Initialising WS2812 LEDs on GPIO%d (RMT TX driver)",
+             PIN_LED_DATA);
 
-    rmt_config_t cfg = RMT_DEFAULT_CONFIG_TX(PIN_LED_DATA, rmt_ch);
-    cfg.clk_div = 2;  /* 40MHz -> 25ns per tick */
-    rmt_config(&cfg);
-    rmt_driver_install(rmt_ch, 0, 0);
+    /* ── Create RMT TX channel ── */
+    rmt_tx_channel_config_t tx_chan_cfg = {
+        .gpio_num          = PIN_LED_DATA,
+        .clk_src           = RMT_CLK_SRC_DEFAULT,
+        .resolution_hz     = RMT_LED_RESOLUTION_HZ,
+        .mem_block_symbols = 192,  /* LED_COUNT(6)×24 bits = 144 symbols; 3×64 blocks */
+        .trans_queue_depth = 4,
+    };
+    ESP_ERROR_CHECK(rmt_new_tx_channel(&tx_chan_cfg, &s_rmt_chan));
+
+    /* ── Create bytes encoder with WS2812 bit timing ── */
+    rmt_bytes_encoder_config_t enc_cfg = {
+        /* bit-0: 400 ns high, 900 ns low */
+        .bit0 = {
+            .level0 = 1, .duration0 = 4,
+            .level1 = 0, .duration1 = 9,
+        },
+        /* bit-1: 800 ns high, 500 ns low */
+        .bit1 = {
+            .level0 = 1, .duration0 = 8,
+            .level1 = 0, .duration1 = 5,
+        },
+        .flags.msb_first = 1,   /* WS2812 sends MSB first */
+    };
+    ESP_ERROR_CHECK(rmt_new_bytes_encoder(&enc_cfg, &s_bytes_enc));
+
+    /* ── Enable channel and blank the strip ── */
+    ESP_ERROR_CHECK(rmt_enable(s_rmt_chan));
 
     memset(led_data, 0, sizeof(led_data));
     ws2812_write();
@@ -86,7 +129,7 @@ void leds_effect_breath(void)
     phase += 0.05f;
     float val = (sinf(phase) + 1.0f) / 2.0f;
     uint8_t v = (uint8_t)(val * 200);
-    leds_set_all(v/3, v/2, v);
+    leds_set_all(v / 3, v / 2, v);
     leds_update();
 }
 
@@ -96,17 +139,17 @@ void leds_effect_rainbow(void)
     hue_offset = (hue_offset + 4) % 360;
     for (int i = 0; i < LED_COUNT; i++) {
         int hue = (hue_offset + i * 60) % 360;
-        /* Simple HSV->RGB at S=1, V=200 */
+        /* Simple HSV→RGB at S=1, V=200 */
         int sector = hue / 60;
         int f = (hue % 60) * 200 / 60;
         uint8_t r, g, b;
         switch (sector) {
-            case 0: r=200; g=f;   b=0;     break;
-            case 1: r=200-f; g=200; b=0;   break;
-            case 2: r=0;   g=200; b=f;     break;
-            case 3: r=0;   g=200-f; b=200; break;
-            case 4: r=f;   g=0;   b=200;   break;
-            default: r=200; g=0;  b=200-f; break;
+            case 0:  r = 200; g = f;       b = 0;       break;
+            case 1:  r = 200 - f; g = 200; b = 0;       break;
+            case 2:  r = 0;   g = 200;     b = f;       break;
+            case 3:  r = 0;   g = 200 - f; b = 200;     break;
+            case 4:  r = f;   g = 0;       b = 200;     break;
+            default: r = 200; g = 0;       b = 200 - f; break;
         }
         leds_set_color(i, r, g, b);
     }
