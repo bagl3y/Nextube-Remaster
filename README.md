@@ -1,6 +1,6 @@
 # Nextube Open-Source Firmware
 
-[![Build](https://github.com/YOUR_USER/nextube-fw/actions/workflows/build.yml/badge.svg)](https://github.com/YOUR_USER/nextube-fw/actions/workflows/build.yml)
+[![Build](https://github.com/MrToast99/Nextube-Remaster/actions/workflows/build.yml/badge.svg)](https://github.com/MrToast99/Nextube-Remaster/actions/workflows/build.yml)
 
 **Unofficial** open-source replacement firmware for the [Rotrics Nextube](https://www.rotrics.com/) split-flap–style digital clock, reverse-engineered from a full flash dump of the original ESP32 firmware.
 
@@ -25,8 +25,8 @@ The Nextube is a desktop clock with six small IPS LCD displays that simulate a s
 | OpenWeatherMap integration | ✅ Working |
 | YouTube subscriber counter | ✅ Working |
 | Bilibili follower counter | ✅ Working |
+| DAC audio playback (LTK8002D amp, WAV files) | ✅ Working |
 | Clock themes (Nixie/Digital/Flip art) | 🔧 Stub (needs theme images) |
-| DAC audio playback (LTK8002D amp) | 🔧 Stub |
 | Countdown / Pomodoro timer modes | 🔧 Stub |
 | Scoreboard mode | 🔧 Stub |
 | Album/slideshow mode | 🔧 Stub |
@@ -71,7 +71,7 @@ The stock firmware was built with **ESP-IDF v4.4** + **Arduino framework** via P
 
 ### Prerequisites
 
-- [ESP-IDF v4.4.x](https://docs.espressif.com/projects/esp-idf/en/v4.4.7/esp32/get-started/) installed
+- [ESP-IDF v5.5.x](https://docs.espressif.com/projects/esp-idf/en/v5.5/esp32/get-started/) installed
 - Or just push to GitHub — the CI workflow builds automatically
 
 ### Local Build
@@ -109,12 +109,15 @@ esptool.py --chip esp32 --port /dev/ttyUSB0 --baud 921600 \
 
 # Or individual partitions
 esptool.py --chip esp32 --port /dev/ttyUSB0 --baud 921600 \
+  --flash_mode dio --flash_freq 40m --flash_size 16MB \
   write_flash \
   0x1000   bootloader.bin \
   0x8000   partition-table.bin \
   0x10000  nextube-fw.bin \
   0x910000 spiffs.bin
 ```
+
+> **Note:** On Windows replace `/dev/ttyUSB0` with your COM port (e.g. `COM3`).
 
 ## Web Management UI
 
@@ -163,7 +166,7 @@ nextube-fw/
 │   ├── leds/                      # WS2812 RGB LED effects
 │   ├── touch/                     # Capacitive touch input
 │   ├── rtc/                       # PCF8563 RTC driver
-│   ├── audio/                     # DAC audio playback
+│   ├── audio/                     # DAC audio playback (WAV)
 │   ├── wifi_manager/              # AP+STA WiFi management
 │   ├── web_server/                # HTTP server + REST API
 │   ├── ntp_time/                  # NTP synchronisation
@@ -181,9 +184,8 @@ nextube-fw/
 This is a community reverse-engineering effort. Key areas needing help:
 
 1. **Theme images** — Extract or recreate the Nixie/Digital/Flip digit artwork for the displays
-2. **Audio playback** — Implement WAV/MP3 playback via the DAC and LTK8002D amplifier
-3. **Display modes** — Complete the countdown, pomodoro, scoreboard, and album modes
-4. **SHT30 sensor** — Add temperature/humidity sensor support (I²C addr 0x44)
+2. **Display modes** — Complete the countdown, pomodoro, scoreboard, and album modes
+3. **SHT30 sensor** — Add temperature/humidity sensor support (I²C addr 0x44)
 
 ## License
 

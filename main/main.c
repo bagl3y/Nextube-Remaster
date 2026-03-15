@@ -76,10 +76,10 @@ static void init_nvs(void)
 /* ── Application entry ─────────────────────────────────────────────── */
 void app_main(void)
 {
-    ESP_LOGI(TAG, "╔══════════════════════════════════════╗");
-    ESP_LOGI(TAG, "║  Nextube Open-Source Firmware v1.0   ║");
-    ESP_LOGI(TAG, "║  github.com/you/nextube-fw          ║");
-    ESP_LOGI(TAG, "╚══════════════════════════════════════╝");
+    ESP_LOGI(TAG, "╔════════════════════════════════════════════════╗");
+    ESP_LOGI(TAG, "║  Nextube Open-Source Firmware v1.0             ║");
+    ESP_LOGI(TAG, "║  https://github.com/MrToast99/Nextube-Remaster ║");
+    ESP_LOGI(TAG, "╚════════════════════════════════════════════════╝");
 
     /* Core initialisations */
     init_nvs();
