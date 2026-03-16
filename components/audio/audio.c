@@ -247,6 +247,20 @@ static void audio_play_task(void *arg)
              path, (unsigned)hdr.sample_rate, hdr.num_channels,
              hdr.bits_per_sample, s_volume);
 
+    /* ── Upsample factor for low sample-rate files ────────────────────
+     * The ESP32 DAC DMA uses I2S internally with 32× oversampling.
+     * Required clock divider = APB / (sample_rate × 32) = 80 MHz / (rate × 32).
+     * The divider register is 8-bit (max 255), giving a minimum usable rate of
+     * 80,000,000 / (255 × 32) ≈ 9,804 Hz.  8,000 Hz (divider = 312) is out of
+     * range and dac_continuous_new_channels() returns ESP_ERR_INVALID_ARG.
+     * Fix: nearest-neighbour integer upsample to bring dac_rate ≥ 9,900 Hz. */
+    uint32_t upsample = 1;
+    uint32_t dac_rate = hdr.sample_rate;
+    while (dac_rate < 9900) { upsample <<= 1; dac_rate <<= 1; }
+    if (upsample > 1)
+        ESP_LOGI(TAG, "Upsampling x%u: %u Hz → %u Hz (DAC min ≈9804 Hz)",
+                 (unsigned)upsample, (unsigned)hdr.sample_rate, (unsigned)dac_rate);
+
     /* ── DMA window in internal SRAM ──────────────────────────────────
      * The DAC DMA controller cannot access PSRAM.  All PCM is streamed
      * directly from SPIFFS into this internal-SRAM window (no pre-buffer).
@@ -260,8 +274,8 @@ static void audio_play_task(void *arg)
     }
     ESP_LOGI(TAG, "DMA window @%p (internal SRAM)", buf);
 
-    /* ── Start DAC continuous at the file's sample rate ── */
-    if (dac_cont_start(hdr.sample_rate) != ESP_OK)
+    /* ── Start DAC continuous at the (possibly upsampled) rate ── */
+    if (dac_cont_start(dac_rate) != ESP_OK)
         goto task_cleanup;   /* buf allocated; task_cleanup frees it */
 
     /* ── Prime DMA ring with a short silence burst ─────────────────────
@@ -275,7 +289,7 @@ static void audio_play_task(void *arg)
      * At 8 000 Hz this is 800 bytes — far less than the old full-ring fill
      * of 16 384 bytes which caused a ~2-second silence before audio started. */
     {
-        size_t prime_bytes = hdr.sample_rate / 10;   /* 100 ms of 8-bit mono */
+        size_t prime_bytes = dac_rate / 10;   /* 100 ms of 8-bit mono at dac_rate */
         if (prime_bytes > STREAM_BUF_BYTES) prime_bytes = STREAM_BUF_BYTES;
         memset(buf, 128, prime_bytes);
         size_t _w;
@@ -289,9 +303,16 @@ static void audio_play_task(void *arg)
         uint32_t frame = 0, write_stalls = 0, total_bytes_out = 0;
         int64_t  t_start = esp_timer_get_time();
 
+        /* When upsampling, read fewer raw bytes so the expanded output still
+         * fits inside the STREAM_BUF_BYTES DMA window.
+         *   8-bit  : read STREAM_BUF_BYTES/upsample → expand → STREAM_BUF_BYTES
+         *   16-bit : read STREAM_BUF_BYTES/upsample → pcm16_to_pcm8 halves it
+         *            → expand × upsample → STREAM_BUF_BYTES/2  (always fits)  */
+        const size_t read_size = STREAM_BUF_BYTES / upsample;
+
         while (!s_stop_flag) {
             int64_t t_rd = esp_timer_get_time();
-            int rd = (int)fread(buf, 1, STREAM_BUF_BYTES, f);
+            int rd = (int)fread(buf, 1, read_size, f);
             int64_t rd_us = esp_timer_get_time() - t_rd;
             if (rd <= 0) break;
             if (rd_us > 50000)
@@ -305,6 +326,18 @@ static void audio_play_task(void *arg)
             int out_bytes = rd;
             if (hdr.bits_per_sample == 16)
                 out_bytes = pcm16_to_pcm8(buf, rd);
+
+            /* Integer nearest-neighbour upsample ─────────────────────────
+             * Expand 8-bit samples in-place, back-to-front, so we never
+             * overwrite a source sample before it has been duplicated. */
+            if (upsample > 1) {
+                for (int i = out_bytes - 1; i >= 0; i--) {
+                    uint8_t s = buf[i];
+                    for (uint32_t j = 0; j < upsample; j++)
+                        buf[(uint32_t)i * upsample + j] = s;
+                }
+                out_bytes *= (int)upsample;
+            }
 
             size_t written = 0;
             int64_t t_wr = esp_timer_get_time();
@@ -380,7 +413,14 @@ void audio_init(void)
     }
     dac_oneshot_output_voltage(s_dac_one, 128);   /* settle at mid-rail = silence */
 
-    s_play_mutex = xSemaphoreCreateMutex();
+    /* Binary semaphore (no task-ownership enforcement).
+     * A mutex requires that the same task which called xSemaphoreTake also
+     * calls xSemaphoreGive — but audio_play_file() takes in the caller's task
+     * while audio_play_task gives on exit, which is a different task.
+     * That cross-task give triggers the FreeRTOS assert in xTaskPriorityDisinherit.
+     * A binary semaphore has identical counting behaviour with no ownership check. */
+    s_play_mutex = xSemaphoreCreateBinary();
+    xSemaphoreGive(s_play_mutex);   /* start in "available" state */
 }
 
 void audio_play_file(const char *path)

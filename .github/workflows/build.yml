@@ -17,7 +17,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Extract firmware version
         id: version
@@ -54,7 +54,7 @@ jobs:
             0x910000 build/spiffs.bin
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: nextube-firmware
           path: artifacts/
@@ -68,7 +68,7 @@ jobs:
 
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v4.2.1
         with:
           name: nextube-firmware
           path: artifacts/
@@ -81,7 +81,7 @@ jobs:
           cd ..
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           name: Nextube-Remaster v${{ needs.build.outputs.fw_version }}
           files: Nextube-Remaster v${{ needs.build.outputs.fw_version }}.zip
