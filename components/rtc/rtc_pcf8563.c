@@ -23,7 +23,7 @@ static esp_err_t i2c_write_reg(uint8_t reg, const uint8_t *data, size_t len)
     return i2c_master_write_to_device(I2C_PORT, RTC_I2C_ADDR, buf, len + 1, pdMS_TO_TICKS(100));
 }
 
-void rtc_init(void)
+void pcf8563_init(void)
 {
     ESP_LOGI(TAG, "Initialising I2C for PCF8563 RTC");
 

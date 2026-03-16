@@ -177,7 +177,7 @@ void app_main(void)
     leds_task_start();
     touch_input_init();
     touch_input_register_callback(on_touch);
-    rtc_init();
+    pcf8563_init();
 
     /* Networking – start AP+STA, then web server */
     wifi_manager_start();
