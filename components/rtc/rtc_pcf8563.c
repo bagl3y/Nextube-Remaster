@@ -2,6 +2,7 @@
 #include "board_pins.h"
 #include "esp_log.h"
 #include "driver/i2c_master.h"
+#include "freertos/FreeRTOS.h"
 #include <string.h>
 
 static const char *TAG = "rtc";
