@@ -34,6 +34,7 @@
 #include <stdlib.h>
 #include <strings.h>    /* strcasecmp */
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 
 static const char *TAG = "audio";
 
@@ -179,6 +180,11 @@ static void audio_play_task(void *arg)
     path[sizeof(path) - 1] = '\0';
     free(a);
 
+    ESP_LOGI(TAG, "task start: internal_free=%u  total_free=%u  stack_hwm=%u",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)esp_get_free_heap_size(),
+             (unsigned)uxTaskGetStackHighWaterMark(NULL));
+
     uint8_t *buf = NULL;
 
     /* ── Open file ── */
@@ -247,26 +253,65 @@ static void audio_play_task(void *arg)
         goto task_cleanup;
     }
 
+    {
+        /* Verify the buffer landed in internal SRAM, not PSRAM.
+         * PSRAM is mapped at 0x3F800000–0x3FBFFFFF on ESP32-WROVER-E. */
+        const bool buf_in_psram = ((uintptr_t)buf >= 0x3F800000U &&
+                                   (uintptr_t)buf <  0x3FC00000U);
+        ESP_LOGI(TAG, "stream buf @%p (%s)", buf,
+                 buf_in_psram ? "PSRAM — DMA UNSAFE!" : "internal SRAM ok");
+        if (buf_in_psram)
+            ESP_LOGE(TAG, "CRITICAL: buf in PSRAM — DAC DMA will fault AHB bus "
+                          "(LCD + audio will crash)");
+    }
+
     /* ── Stream PCM data ── */
-    while (!s_stop_flag) {
-        int rd = fread(buf, 1, STREAM_BUF_BYTES, f);
-        if (rd <= 0) break;
+    {
+        uint32_t frame = 0, write_stalls = 0, total_bytes_out = 0;
+        int64_t  t_start = esp_timer_get_time();
 
-        /* Volume attenuation (operates on native bit depth) */
-        apply_volume(buf, rd, hdr.bits_per_sample, s_volume);
+        while (!s_stop_flag) {
+            int64_t t_rd = esp_timer_get_time();
+            int rd = fread(buf, 1, STREAM_BUF_BYTES, f);
+            int64_t rd_us = esp_timer_get_time() - t_rd;
+            if (rd <= 0) break;
 
-        /* DAC continuous only accepts 8-bit unsigned PCM */
-        int out_bytes = rd;
-        if (hdr.bits_per_sample == 16)
-            out_bytes = pcm16_to_pcm8(buf, rd);
+            if (rd_us > 50000)
+                ESP_LOGW(TAG, "fread slow: %lld ms (frame %u)",
+                         (long long)(rd_us / 1000), frame);
 
-        size_t written = 0;
-        esp_err_t werr = dac_continuous_write(s_dac_cont, buf, (size_t)out_bytes,
-                                              &written, pdMS_TO_TICKS(1000));
-        if (werr != ESP_OK) {
-            ESP_LOGW(TAG, "DAC write error %s — stopping playback", esp_err_to_name(werr));
-            break;
+            /* Volume attenuation (operates on native bit depth) */
+            apply_volume(buf, rd, hdr.bits_per_sample, s_volume);
+
+            /* DAC continuous only accepts 8-bit unsigned PCM */
+            int out_bytes = rd;
+            if (hdr.bits_per_sample == 16)
+                out_bytes = pcm16_to_pcm8(buf, rd);
+
+            size_t written = 0;
+            int64_t t_wr = esp_timer_get_time();
+            esp_err_t werr = dac_continuous_write(s_dac_cont, buf, (size_t)out_bytes,
+                                                  &written, pdMS_TO_TICKS(1000));
+            int64_t wr_us = esp_timer_get_time() - t_wr;
+
+            if (wr_us > 50000) {
+                write_stalls++;
+                ESP_LOGW(TAG, "DAC write stall: %lld ms (frame %u, written=%u/%d)",
+                         (long long)(wr_us / 1000), frame,
+                         (unsigned)written, out_bytes);
+            }
+            if (werr != ESP_OK) {
+                ESP_LOGW(TAG, "DAC write error %s — stopping playback",
+                         esp_err_to_name(werr));
+                break;
+            }
+            total_bytes_out += (uint32_t)written;
+            frame++;
         }
+
+        int64_t elapsed_ms = (esp_timer_get_time() - t_start) / 1000;
+        ESP_LOGI(TAG, "playback done: %u frames  %u bytes  %lld ms  %u stalls",
+                 frame, total_bytes_out, (long long)elapsed_ms, write_stalls);
     }
 
 task_cleanup:
@@ -276,6 +321,9 @@ task_cleanup:
 task_close:
     fclose(f);
 task_exit:
+    ESP_LOGI(TAG, "task exit: stack_hwm=%u  internal_free=%u",
+             (unsigned)uxTaskGetStackHighWaterMark(NULL),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     xSemaphoreGive(s_play_mutex);
     s_audio_task = NULL;
     vTaskDelete(NULL);
