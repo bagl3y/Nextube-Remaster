@@ -133,10 +133,18 @@ select option{background:var(--accent);color:var(--text)}
   <div class="card">
     <h2>LED Accent Lighting</h2>
     <div class="field"><label>Mode</label>
-      <select id="f-blmode"><option>Static</option><option>Breath</option><option>Rainbow</option><option>Off</option></select>
+      <select id="f-blmode" onchange="onBlModeChange()"><option>Static</option><option>Breath</option><option>Rainbow</option><option>Off</option></select>
     </div>
-    <div class="field"><label>LED Colours (click to change)</label>
+    <div class="field" id="led-color-section">
+      <label>LED Colours (click to change)</label>
       <div id="color-swatches" style="display:flex;gap:16px;flex-wrap:wrap;margin-top:.4rem"></div>
+      <div style="display:flex;align-items:center;gap:.7rem;margin-top:.9rem;flex-wrap:wrap">
+        <label style="font-size:.8rem;color:var(--dim);white-space:nowrap">Set all tubes:</label>
+        <input type="color" id="led-all-color" value="#ff6600"
+               style="width:44px;height:36px;border:none;background:none;cursor:pointer;padding:2px;border-radius:6px">
+        <button class="btn btn-outline" style="padding:.35rem .9rem;font-size:.8rem"
+                onclick="applyColorToAll()">Apply to All</button>
+      </div>
     </div>
   </div>
   <div class="card">
@@ -392,7 +400,7 @@ async function loadSettings() {
   $('f-timetype').value = a.type || '24H';
   $('f-lcdbr').value = cfg.lcd_brightness || 30; $('v-lcdbr').textContent = cfg.lcd_brightness || 30;
   $('f-ledbr').value = cfg.led_brightness || 60; $('v-ledbr').textContent = cfg.led_brightness || 60;
-  $('f-blmode').value = cfg.backlight_mode || 'Breath';
+  $('f-blmode').value = cfg.backlight_mode || 'Breath'; onBlModeChange();
   $('f-ssid').value = cfg.ssid || '';
   $('f-pass').value = cfg.password || '';
   $('f-tz').value = cfg.time_zone !== undefined ? cfg.time_zone : -6;
@@ -449,6 +457,21 @@ async function loadSettings() {
     col.appendChild(lbl);
     col.appendChild(d);
     sw.appendChild(col);
+  });
+}
+
+/* ── LED mode change – hide colour pickers for Rainbow / Off ── */
+function onBlModeChange() {
+  const mode = $('f-blmode').value;
+  const show = (mode === 'Static' || mode === 'Breath');
+  $('led-color-section').style.display = show ? '' : 'none';
+}
+
+/* ── Apply single colour to all tube swatches ── */
+function applyColorToAll() {
+  const hex = $('led-all-color').value.replace('#', '');
+  document.querySelectorAll('#color-swatches input[type=color]').forEach(el => {
+    el.value = '#' + hex;
   });
 }
 

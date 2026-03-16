@@ -460,6 +460,7 @@ static void render_album(const nextube_config_t *cfg,
  *     negative single-digit : [-][units][C/F][blank][blank][icon]
  *     negative double-digit : [-][tens][units][C/F][blank][icon]
  *   Leading zeros are blank.  Negative temps suppress humidity entirely.
+ *   All blank slots use AMPM/blank.jpg for a theme-consistent appearance.
  *   Unit: Temperature/degreec.jpg or Temperature/degreef.jpg
  *   tube  5   : weather icon from MutiInfo/Weather/{icon}.jpg
  *
@@ -522,7 +523,7 @@ static void render_weather(const nextube_config_t *cfg)
     if (!negative) {
         /* Tube 0: temperature tens — blank if zero (no leading zero) */
         if (temp / 10 == 0) {
-            display_fill(0, 0x0000);
+            display_show_ampm(0, "blank", cfg->theme);
         } else {
             display_path_number(path, sizeof(path), cfg->theme, temp / 10);
             display_show_image(0, path);
@@ -535,7 +536,7 @@ static void render_weather(const nextube_config_t *cfg)
         display_show_image(2, path);
         /* Tube 3: humidity tens — blank if zero */
         if (hum / 10 == 0) {
-            display_fill(3, 0x0000);
+            display_show_ampm(3, "blank", cfg->theme);
         } else {
             display_path_number(path, sizeof(path), cfg->theme, hum / 10);
             display_show_image(3, path);
@@ -551,8 +552,8 @@ static void render_weather(const nextube_config_t *cfg)
         display_show_image(1, path);
         display_path_temperature(path, sizeof(path), cfg->theme, unit);
         display_show_image(2, path);
-        display_fill(3, 0x0000);
-        display_fill(4, 0x0000);
+        display_show_ampm(3, "blank", cfg->theme);
+        display_show_ampm(4, "blank", cfg->theme);
     } else {
         /* Double-digit negative: [-][tens][units][°C/F][blank][icon] */
         display_path_temperature(path, sizeof(path), cfg->theme, "minus");
@@ -563,7 +564,7 @@ static void render_weather(const nextube_config_t *cfg)
         display_show_image(2, path);
         display_path_temperature(path, sizeof(path), cfg->theme, unit);
         display_show_image(3, path);
-        display_fill(4, 0x0000);
+        display_show_ampm(4, "blank", cfg->theme);
     }
 
     /* Tube 5: weather icon */

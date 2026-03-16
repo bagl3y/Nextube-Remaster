@@ -117,7 +117,19 @@ Every push to `main` triggers a GitHub Actions build. Tagged releases (`v*`) aut
 
 ## Flashing
 
-### First-time / Full Flash (USB)
+### Option A — Browser-based (no tools required)
+
+**[ESPConnect](https://thelastoutpostworkshop.github.io/ESPConnect/)** is the easiest way to flash — no Python, no drivers, no CLI. It runs entirely in the browser using the Web Serial API (Chrome / Edge only).
+
+1. Open **https://thelastoutpostworkshop.github.io/ESPConnect/** in Chrome or Edge
+2. Connect the Nextube via USB
+3. Click **Connect** and select the device's COM port
+4. Set baud rate to **460800**
+5. Flash `nextube-fw-full.bin` at offset `0x0`
+
+> **Note:** Web Serial requires Chrome or Edge. Firefox is not supported.
+
+### Option B — First-time / Full Flash (esptool CLI)
 
 Use the merged binary for a clean install — this writes all partitions in one shot:
 
@@ -130,7 +142,7 @@ esptool.py --chip esp32 --port /dev/ttyUSB0 --baud 921600 \
 
 After the flash tool resets the device, the firmware performs one automatic restart to ensure the WiFi hardware initialises cleanly — this is normal and takes about half a second.
 
-### Individual Partitions (USB)
+### Option C — Individual Partitions (esptool CLI)
 
 ```bash
 esptool.py --chip esp32 --port /dev/ttyUSB0 --baud 921600 \
@@ -200,7 +212,7 @@ Enable **Auto Rotation** in Display settings to automatically cycle through all 
 | Button | Action |
 |---|---|
 | LEFT | Previous enabled mode |
-| MIDDLE | Toggle LED accent lighting on/off |
+| MIDDLE | Toggle LCD displays on/off (backlight) |
 | RIGHT | Next enabled mode |
 
 ## Weather
@@ -222,13 +234,14 @@ Negative single:  [-] [units] [°C/°F] [blank] [blank] [icon]
 Negative double:  [-] [tens] [units] [°C/°F] [blank] [icon]
 ```
 
-Required SPIFFS image files (`/images/themes/{theme}/MutiInfo/`):
+Required SPIFFS image files:
 
 ```
-Temperature/  degreec.jpg  degreef.jpg  minus.jpg
-Weather/      sun.jpg  fewClouds.jpg  overcastClouds.jpg  fog.jpg
-              rain.jpg  snow.jpg  squalls.jpg  thunderstorm.jpg
-              sand.jpg  tornado.jpg  volcanicAsh.jpg
+/images/themes/{theme}/MutiInfo/Temperature/  degreec.jpg  degreef.jpg  minus.jpg
+/images/themes/{theme}/MutiInfo/Weather/      sun.jpg  fewClouds.jpg  overcastClouds.jpg  fog.jpg
+                                              rain.jpg  snow.jpg  squalls.jpg  thunderstorm.jpg
+                                              sand.jpg  tornado.jpg  volcanicAsh.jpg
+/images/themes/{theme}/AMPM/                  blank.jpg   ← used for all suppressed/blank tube slots
 ```
 
 ## REST API
