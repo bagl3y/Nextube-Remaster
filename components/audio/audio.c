@@ -399,6 +399,21 @@ void audio_play_file(const char *path)
         return;
     }
 
+    if (!s_play_mutex) {
+        ESP_LOGE(TAG, "audio_play_file: mutex NULL — audio_init() not called?");
+        return;
+    }
+
+    /* Orphaned-mutex recovery: if the playback task was killed externally
+     * (watchdog, stack overflow) it never reached xSemaphoreGive().
+     * Detect this by checking that the task handle is NULL (task is gone)
+     * while the mutex is still taken (count=0).  Force-release so the next
+     * play request is not permanently blocked. */
+    if (s_audio_task == NULL && uxSemaphoreGetCount(s_play_mutex) == 0) {
+        ESP_LOGW(TAG, "Orphaned play mutex detected (task dead) — force-releasing");
+        xSemaphoreGive(s_play_mutex);
+    }
+
     /* Non-blocking: drop immediately if a sound is already playing.
      * audio_play_file() is called from the touch-handler and HTTP-handler
      * tasks.  The old audio_stop() + 300 ms mutex wait blocked those tasks
@@ -410,7 +425,7 @@ void audio_play_file(const char *path)
      * the correct behaviour.  To interrupt a playing file and start a new
      * one, call audio_stop() explicitly before audio_play_file(). */
     if (xSemaphoreTake(s_play_mutex, 0) != pdTRUE) {
-        ESP_LOGI(TAG, "audio busy — dropping %s", path);
+        ESP_LOGW(TAG, "audio busy — dropping %s", path);
         return;
     }
 

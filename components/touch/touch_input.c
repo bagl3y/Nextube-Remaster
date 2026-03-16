@@ -82,8 +82,10 @@ static void touch_handler_task(void *arg)
 static void touch_poll_task(void *arg)
 {
     bool was_pressed[3]    = { false, false, false };
-    int  stuck_count[3]    = { 0, 0, 0 };   /* detect stuck-pressed       */
-    int  debounce_count[3] = { 0, 0, 0 };   /* consecutive pressed samples */
+    int  stuck_count[3]    = { 0, 0, 0 };   /* detect stuck-pressed           */
+    int  debounce_count[3] = { 0, 0, 0 };   /* consecutive pressed samples     */
+    bool armed[3]          = { true, true, true }; /* false after stuck recovery
+                                                     * until pad fully releases  */
 
     while (1) {
         for (int i = 0; i < 3; i++) {
@@ -115,20 +117,32 @@ static void touch_poll_task(void *arg)
             }
             bool pressed = (debounce_count[i] >= PRESS_DEBOUNCE);
 
-            /* Stuck-press recovery: force-release after 1 s (20 × 50 ms) */
+            /* Stuck-press recovery: force-release after 1 s (20 × 50 ms).
+             *
+             * After recovery, set armed=false to prevent the debounce counter
+             * from immediately re-firing while the finger is still down.
+             * armed is restored to true only when the pad fully releases
+             * (raw=false), guaranteeing exactly one event per physical press
+             * regardless of how long the pad is held. */
             if (raw) {
                 stuck_count[i]++;
                 if (stuck_count[i] > 20) {
                     was_pressed[i]    = false;
                     stuck_count[i]    = 0;
                     debounce_count[i] = 0;
+                    armed[i]          = false;  /* disarm until pad releases */
+                    ESP_LOGW(TAG, "Touch%d stuck-press recovery — disarmed", i);
                 }
             } else {
                 stuck_count[i] = 0;
+                if (!armed[i]) {
+                    armed[i] = true;   /* pad released: re-arm for next press */
+                    ESP_LOGI(TAG, "Touch%d re-armed after release", i);
+                }
             }
 
-            /* Fire on debounced rising edge only */
-            if (pressed && !was_pressed[i]) {
+            /* Fire on debounced rising edge — only when armed */
+            if (pressed && !was_pressed[i] && armed[i]) {
                 touch_pad_id_t id = (touch_pad_id_t)i;
                 ESP_LOGI(TAG, "Touch%d pressed (smooth=%u baseline=%u)",
                          i, (unsigned)smooth[0], (unsigned)s_baseline[i]);
