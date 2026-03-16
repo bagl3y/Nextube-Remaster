@@ -72,6 +72,8 @@ typedef struct {
     char             bell_file[64];
     char             tone_file[64];
     char             timer_file[64];
+    char             click_file[64];     /* sound played on physical button press */
+    bool             button_sound;       /* enable/disable button click sound */
     uint8_t          volume;             /* 0-100 */
 
     /* Countdown / Pomodoro */

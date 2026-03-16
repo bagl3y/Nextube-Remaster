@@ -268,6 +268,16 @@ select option{background:var(--accent);color:var(--text)}
         <button class="btn btn-outline" style="white-space:nowrap;padding:.35rem .8rem" onclick="testAudio('f-timer')">▶ Test</button>
       </div>
     </div>
+    <div class="field"><label>Button Click Sound</label>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input id="f-click" type="text" style="flex:1" placeholder="/spiffs/audio/click.wav">
+        <button class="btn btn-outline" style="white-space:nowrap;padding:.35rem .8rem" onclick="testAudio('f-click')">▶ Test</button>
+      </div>
+      <div style="margin-top:6px;display:flex;align-items:center;gap:8px">
+        <input type="checkbox" id="f-btn-sound" style="width:16px;height:16px;cursor:pointer">
+        <label for="f-btn-sound" style="margin:0;cursor:pointer;font-weight:normal">Enable click sound on button press</label>
+      </div>
+    </div>
   </div>
   <div class="btn-group"><button class="btn btn-primary" onclick="saveSettings()">Save Audio</button></div>
 </div>
@@ -416,6 +426,8 @@ async function loadSettings() {
   $('f-music').value = cfg.music_file || '';
   $('f-bell').value = cfg.bell_file || '';
   $('f-timer').value = cfg.timer_file || '';
+  $('f-click').value = cfg.click_file || '';
+  $('f-btn-sound').checked = cfg.button_sound !== false;
 
   /* Enabled modes bitmask.  Default 0xDF = all on except Custom Clock (bit 5). */
   const em = cfg.enabled_modes !== undefined ? cfg.enabled_modes : 0xDF;
@@ -508,6 +520,7 @@ async function saveSettings() {
     weather_source: $('f-wsrc').value, weather_api_key: $('f-wkey').value, City: $('f-city').value, temperature_formate: $('f-tempfmt').value,
     video_site: $('f-vsite').value, youtube_id: $('f-ytid').value, youtube_key: $('f-ytkey').value, bili_uid: $('f-buid').value,
     volume: +$('f-vol').value, music_file: $('f-music').value, bell_file: $('f-bell').value, timer_file: $('f-timer').value,
+    click_file: $('f-click').value, button_sound: $('f-btn-sound').checked,
   };
   const res = await api('settings', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
   toast(res?.status === 'ok' ? 'Settings saved!' : 'Save failed', res?.status !== 'ok');

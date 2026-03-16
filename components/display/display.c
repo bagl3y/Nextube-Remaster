@@ -392,7 +392,7 @@ static void flip_prime_blank(int tube, const char *theme)
     if (strstr(s_flip_path[tube], "/Temperature/degree")  != NULL) return;
 
     /* ── Decode blank.jpg → PSRAM and store as the previous frame ── */
-    char full[320];
+    char full[328];   /* 320 (blank_path max) + 7 ("/spiffs") + 1 (NUL) */
     snprintf(full, sizeof(full), "/spiffs%s", blank_path);
     FILE *f = fopen(full, "rb");
     if (!f) return;

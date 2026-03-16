@@ -59,6 +59,8 @@ static void set_defaults(void)
     strcpy(s_cfg.bell_file, "/spiffs/audio/bell.wav");
     strcpy(s_cfg.tone_file, "/spiffs/audio/tremolo3.wav");
     strcpy(s_cfg.timer_file, "/spiffs/audio/timer.wav");
+    strcpy(s_cfg.click_file, "");        /* empty = silent until user sets a file */
+    s_cfg.button_sound = true;
     s_cfg.volume = 20;
 
     s_cfg.countdown_minutes = 1;
@@ -142,6 +144,11 @@ static void parse_json(const char *json)
     json_read_str(root, "bell_file",        s_cfg.bell_file,       sizeof(s_cfg.bell_file));
     json_read_str(root, "tone_file",        s_cfg.tone_file,       sizeof(s_cfg.tone_file));
     json_read_str(root, "timer_file",       s_cfg.timer_file,      sizeof(s_cfg.timer_file));
+    json_read_str(root, "click_file",       s_cfg.click_file,      sizeof(s_cfg.click_file));
+    {
+        cJSON *bs = cJSON_GetObjectItem(root, "button_sound");
+        if (cJSON_IsBool(bs)) s_cfg.button_sound = cJSON_IsTrue(bs);
+    }
 
     /* time_zone: new format = ±hours (|value| ≤ 24), legacy = raw seconds (|value| > 24).
      * Migration: old SPIFFS files stored -21600 (seconds); new format stores -6 (hours). */
@@ -317,6 +324,8 @@ char *config_to_json(void)
     cJSON_AddStringToObject(root, "bell_file",        s_cfg.bell_file);
     cJSON_AddStringToObject(root, "tone_file",        s_cfg.tone_file);
     cJSON_AddStringToObject(root, "timer_file",       s_cfg.timer_file);
+    cJSON_AddStringToObject(root, "click_file",       s_cfg.click_file);
+    cJSON_AddBoolToObject  (root, "button_sound",     s_cfg.button_sound);
     cJSON_AddNumberToObject(root, "volume",           s_cfg.volume);
     cJSON_AddNumberToObject(root, "lcd_brightness",   s_cfg.lcd_brightness);
     cJSON_AddNumberToObject(root, "led_brightness",   s_cfg.led_brightness);

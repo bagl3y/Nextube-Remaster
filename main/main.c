@@ -97,6 +97,12 @@ static void on_touch(touch_pad_id_t pad)
         break;
     }
     }
+
+    /* Play button-click sound (fires after every touch event).
+     * audio_play_file() returns immediately if the path is empty so no
+     * sound plays until the user configures a click file. */
+    if (cfg->button_sound && cfg->click_file[0] != '\0')
+        audio_play_file(cfg->click_file);
 }
 
 /* ── SPIFFS mount ──────────────────────────────────────────────────── */
