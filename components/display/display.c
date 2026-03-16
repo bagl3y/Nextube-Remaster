@@ -1016,6 +1016,16 @@ static void display_task(void *arg)
         strncpy(last_theme, cfg->theme, sizeof(last_theme) - 1);
         first = false;
 
+        /* Re-sync wake timer when we've fallen behind by more than one
+         * render period (e.g. blocked on SPIFFS while audio pre-buffers).
+         * Without this vTaskDelayUntil fires ~60 times in a row to catch
+         * up after a 12 s SPIFFS stall, repainting all LCDs in a rapid
+         * burst that looks like a "screen reset". */
+        {
+            TickType_t now_tick = xTaskGetTickCount();
+            if ((TickType_t)(now_tick - wake) > pdMS_TO_TICKS(200))
+                wake = now_tick;
+        }
         vTaskDelayUntil(&wake, pdMS_TO_TICKS(200)); /* 5 Hz */
     }
 }

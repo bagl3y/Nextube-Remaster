@@ -82,6 +82,17 @@ static esp_err_t dac_cont_start(uint32_t sample_rate)
         s_dac_one = NULL;
     }
 
+    /* Guard: clean up any orphaned continuous handle left by a previous
+     * task that was killed (e.g. watchdog) before reaching dac_cont_stop().
+     * Without this, dac_continuous_new_channels() returns an error on every
+     * subsequent call and audio never works again until reboot. */
+    if (s_dac_cont) {
+        ESP_LOGW(TAG, "Orphaned dac_cont handle detected — cleaning up before restart");
+        dac_continuous_disable(s_dac_cont);
+        dac_continuous_del_channels(s_dac_cont);
+        s_dac_cont = NULL;
+    }
+
     dac_continuous_config_t cfg = {
         .chan_mask = DAC_CHANNEL_MASK_CH0,
         .desc_num  = DAC_DESC_NUM,
@@ -256,12 +267,32 @@ static void audio_play_task(void *arg)
     if (pcm_size > 0) {
         pcm_buf = (uint8_t *)heap_caps_malloc(pcm_size, MALLOC_CAP_SPIRAM);
         if (pcm_buf) {
+            /* Chunked pre-buffer: read STREAM_BUF_BYTES at a time and yield
+             * 50 ms between chunks so the display task can service the LCDs.
+             *
+             * A single fread(pcm_size) blocks SPIFFS for 10–12 s on a large
+             * WAV file (SPIFFS reads ~573 ms / 4 KB).  While SPIFFS is locked
+             * the display task cannot load JPEG images; when it finally
+             * unblocks it catches up all missed render cycles in rapid
+             * succession, causing all 6 LCDs to repaint in a burst that looks
+             * like a "screen reset".  Chunking + yields prevent both issues. */
             int64_t t_load = esp_timer_get_time();
-            size_t got = fread(pcm_buf, 1, pcm_size, f);
+            size_t  pos    = 0;
+            while (pos < pcm_size && !s_stop_flag) {
+                size_t chunk = pcm_size - pos;
+                if (chunk > (size_t)STREAM_BUF_BYTES)
+                    chunk = (size_t)STREAM_BUF_BYTES;
+                size_t got = fread(pcm_buf + pos, 1, chunk, f);
+                if (got == 0) break;
+                pos += got;
+                vTaskDelay(pdMS_TO_TICKS(50));   /* yield to display task */
+            }
             int64_t load_ms = (esp_timer_get_time() - t_load) / 1000;
-            ESP_LOGI(TAG, "pre-buffered %u bytes into PSRAM @%p in %lld ms",
-                     (unsigned)got, pcm_buf, (long long)load_ms);
-            pcm_size = got;   /* actual bytes read */
+            ESP_LOGI(TAG, "pre-buffered %u/%u bytes into PSRAM in %lld ms%s",
+                     (unsigned)pos, (unsigned)pcm_size,
+                     (long long)load_ms,
+                     s_stop_flag ? " (cancelled)" : "");
+            pcm_size = pos;
         } else {
             ESP_LOGW(TAG, "PSRAM alloc failed for %u bytes — using chunked fread",
                      (unsigned)pcm_size);
@@ -415,7 +446,11 @@ void audio_init(void)
 
 void audio_play_file(const char *path)
 {
-    if (!path || path[0] == '\0') return;
+    if (!path || path[0] == '\0') {
+        ESP_LOGW(TAG, "audio_play_file: empty path — ignoring");
+        return;
+    }
+    ESP_LOGI(TAG, "audio_play_file: %s", path);
 
     /* Only PCM WAV is supported via the built-in DAC */
     const char *ext = strrchr(path, '.');
