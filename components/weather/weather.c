@@ -234,24 +234,47 @@ static const char *wmo_condition(int code)
  * Result is cached; geocoding only runs again when the city changes.
  *
  * The city string may be in "City,CC" format (e.g. "Airdrie,CA") as used by
- * wttr.in.  Open-Meteo's geocoding API expects a plain city name; passing the
- * country code as part of the name returns zero results.  We strip everything
- * after the first comma and use only the city portion for the API call.
+ * wttr.in.  "CC" is a two-letter ISO 3166-1 alpha-2 country code (CA=Canada,
+ * GB=United Kingdom, US=United States, etc.).
+ *
+ * We split on the first comma to get the plain city name, then append
+ * &countrycode=CC to the geocoding request so that "Airdrie,CA" resolves to
+ * Airdrie, Alberta, Canada (lat≈51.3) rather than Airdrie, Scotland (lat≈55.9).
+ * We also request count=5 results and pick the first whose country_code field
+ * matches, falling back to the first result if none match.
  *
  * alt_m may be NULL if the caller doesn't need elevation. */
 static bool geocode_open_meteo(const char *city, float *lat, float *lon, int *alt_m)
 {
-    /* Extract just the city name (before any comma) */
+    /* Split "City,CC" → cityname + optional countrycode */
     char cityname[64];
+    char countrycode[8] = {0};
     strncpy(cityname, city, sizeof(cityname) - 1);
     cityname[sizeof(cityname) - 1] = '\0';
     char *comma = strchr(cityname, ',');
-    if (comma) *comma = '\0';
+    if (comma) {
+        *comma = '\0';
+        strncpy(countrycode, comma + 1, sizeof(countrycode) - 1);
+        countrycode[sizeof(countrycode) - 1] = '\0';
+        /* Trim whitespace */
+        char *p = countrycode;
+        while (*p == ' ') p++;
+        memmove(countrycode, p, strlen(p) + 1);
+    }
 
-    char url[256];
-    snprintf(url, sizeof(url),
-             "https://geocoding-api.open-meteo.com/v1/search"
-             "?name=%s&count=1&format=json", cityname);
+    /* Build URL: include countrycode filter when available; request 5 candidates
+     * so we can verify the match even if the API returns mixed results. */
+    char url[320];
+    if (countrycode[0]) {
+        snprintf(url, sizeof(url),
+                 "https://geocoding-api.open-meteo.com/v1/search"
+                 "?name=%s&count=5&countrycode=%s&format=json",
+                 cityname, countrycode);
+    } else {
+        snprintf(url, sizeof(url),
+                 "https://geocoding-api.open-meteo.com/v1/search"
+                 "?name=%s&count=5&format=json", cityname);
+    }
 
     char *body = http_get(url);
     if (!body) return false;
@@ -260,17 +283,41 @@ static bool geocode_open_meteo(const char *city, float *lat, float *lon, int *al
     free(body);
     if (!root) return false;
 
-    bool ok = false;
-    cJSON *r0 = cJSON_GetArrayItem(cJSON_GetObjectItem(root, "results"), 0);
-    if (r0) {
-        cJSON *la  = cJSON_GetObjectItem(r0, "latitude");
-        cJSON *lo  = cJSON_GetObjectItem(r0, "longitude");
-        cJSON *el  = cJSON_GetObjectItem(r0, "elevation");
+    bool   ok      = false;
+    cJSON *results = cJSON_GetObjectItem(root, "results");
+    int    n_res   = cJSON_GetArraySize(results);
+
+    /* Prefer the first result whose country_code matches; fall back to r[0]. */
+    cJSON *best = cJSON_GetArrayItem(results, 0);
+    if (countrycode[0] && n_res > 1) {
+        for (int i = 0; i < n_res; i++) {
+            cJSON *r  = cJSON_GetArrayItem(results, i);
+            cJSON *cc = cJSON_GetObjectItem(r, "country_code");
+            if (cc && cc->valuestring &&
+                strcasecmp(cc->valuestring, countrycode) == 0) {
+                best = r;
+                break;
+            }
+        }
+    }
+
+    if (best) {
+        cJSON *la = cJSON_GetObjectItem(best, "latitude");
+        cJSON *lo = cJSON_GetObjectItem(best, "longitude");
+        cJSON *el = cJSON_GetObjectItem(best, "elevation");
         if (la && lo) {
             *lat = (float)la->valuedouble;
             *lon = (float)lo->valuedouble;
             if (alt_m) *alt_m = el ? (int)el->valuedouble : 0;
             ok = true;
+            cJSON *nm = cJSON_GetObjectItem(best, "name");
+            cJSON *cc = cJSON_GetObjectItem(best, "country_code");
+            ESP_LOGI("weather", "geocoded '%s' → %s (%s) lat=%.4f lon=%.4f alt=%d m",
+                     city,
+                     nm  && nm->valuestring ? nm->valuestring  : "?",
+                     cc  && cc->valuestring ? cc->valuestring  : "?",
+                     (double)*lat, (double)*lon,
+                     alt_m ? *alt_m : 0);
         }
     }
     cJSON_Delete(root);

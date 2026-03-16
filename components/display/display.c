@@ -9,6 +9,7 @@
 #include "weather.h"
 #include <string.h>
 #include <stdint.h>
+#include <math.h>
 
 static const char *TAG = "display";
 static const int cs_pins[LCD_COUNT] = {
@@ -144,6 +145,10 @@ void display_show_digit(int tube, const uint8_t *data, int w, int h)
 /* ════════════════════════════════════════════════════════════════════
  *  JPEG asset loader
  * ════════════════════════════════════════════════════════════════════ */
+/* Forward declaration — flip_to_image() is defined after display_show_image()
+ * but called from within it for FlipClock theme paths. */
+static void flip_to_image(int tube, const uint8_t *new_buf, const char *path);
+
 #include <stdio.h>
 #include <stdlib.h>
 #include "esp_heap_caps.h"
@@ -210,8 +215,230 @@ void display_show_image(int tube, const char *path)
         free(rgb_buf); display_fill(tube, 0x0000); return;
     }
 
-    /* ── 3. Push RGB565 frame to LCD ────────────────────────────── */
-    display_show_digit(tube, rgb_buf, (int)out_img.width, (int)out_img.height);
+    /* ── 3. Push RGB565 frame to LCD (with FlipClock animation) ────── */
+    if ((int)out_img.width  == LCD_WIDTH  &&
+        (int)out_img.height == LCD_HEIGHT &&
+        strstr(path, "/FlipClock/") != NULL) {
+        /* flip_to_image() runs the split-flap animation when the image
+         * has changed, then pushes the final frame and updates the cache. */
+        flip_to_image(tube, rgb_buf, path);
+    } else {
+        display_show_digit(tube, rgb_buf, (int)out_img.width, (int)out_img.height);
+    }
+    free(rgb_buf);
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ *  FlipClock split-flap animation
+ *
+ *  Activated automatically whenever:
+ *    • the image path contains "/FlipClock/"   (theme detection from path)
+ *    • the decoded frame is exactly LCD_WIDTH × LCD_HEIGHT
+ *    • the path differs from the last path shown on this tube  ← prevents
+ *      static images (e.g. colon) from re-animating every render tick
+ *    • a cached previous frame exists (first show is instant, no animation)
+ *
+ *  Algorithm – 8 intermediate frames, then caller pushes the final frame:
+ *
+ *    Phase 1 (steps 0-3): old digit top half "falls" toward viewer
+ *      – visible rows: cos(22.5°)×80=74 → cos(45°)×80=57 → 31 → 0
+ *      – top portion is vertically compressed (nearest-neighbour scale)
+ *      – thin dark band simulates card-edge thickness
+ *      – bottom half stays as old digit throughout phase 1
+ *
+ *    Phase 2 (steps 4-7): new digit top half "unfolds" away from viewer
+ *      – visible rows: 0 → 31 → 57 → 74  (reverse of phase 1)
+ *      – bottom half switches to new digit at the phase boundary
+ *
+ *    Final frame: pushed by display_show_image() after flip_to_image()
+ *      returns → full new digit, 80 rows top + 80 rows bottom.
+ *
+ *  Timing: each display_show_digit() ≈ 8 ms SPI  →  8 × 8 ms ≈ 67 ms
+ *  total animation, comfortably inside the 200 ms render tick.
+ *
+ *  Memory: 6 × 25 600 B ≈ 150 KB PSRAM for per-tube previous-frame cache
+ *          +  25 600 B PSRAM temporary frame (allocated/freed per call)
+ * ════════════════════════════════════════════════════════════════════ */
+
+#define FLIP_FRAME_BYTES  (LCD_WIDTH * LCD_HEIGHT * 2)  /* 25 600 */
+#define FLIP_ROW_BYTES    (LCD_WIDTH * 2)               /* 160    */
+#define FLIP_HALF         (LCD_HEIGHT / 2)              /* 80     */
+#define FLIP_STEPS        8                             /* animation frames */
+#define FLIP_EDGE_ROWS    2                             /* card-edge px     */
+
+/* Per-tube state -------------------------------------------------------- */
+static uint8_t *s_flip_prev[LCD_COUNT];        /* cached last frame (PSRAM) */
+static char     s_flip_path[LCD_COUNT][320];   /* last image path per tube  */
+
+/* flip_build_frame -------------------------------------------------------
+ * Fill `out` (FLIP_FRAME_BYTES) with one animation frame.
+ *   step 0-3 : old top half folds away  (phase 1)
+ *   step 4-7 : new top half unfolds      (phase 2)
+ */
+static void flip_build_frame(uint8_t       *out,
+                              const uint8_t *old_buf,
+                              const uint8_t *new_buf,
+                              int            step)
+{
+    bool phase2    = (step >= FLIP_STEPS / 2);
+    int  half_step = step % (FLIP_STEPS / 2);           /* 0 .. 3 */
+
+    /* Cosine easing: map half_step → visible top-half row count.
+     *   Phase 1: angle = (half_step+1) × π/8   →  cos ≈ 0.92, 0.71, 0.38, 0.0
+     *   Phase 2: angle = (4-half_step)  × π/8   →  cos ≈ 0.0,  0.38, 0.71, 0.92
+     * Both produce top_rows ∈ { 74, 57, 31, 0 } (falling) or { 0, 31, 57, 74 } (rising). */
+    int   angle_n  = phase2 ? (FLIP_STEPS / 2 - half_step) : (half_step + 1);
+    float angle    = (float)angle_n * (float)M_PI / (float)FLIP_STEPS;
+    int   top_rows = (int)(FLIP_HALF * cosf(angle) + 0.5f);
+    if (top_rows < 0)         top_rows = 0;
+    if (top_rows > FLIP_HALF) top_rows = FLIP_HALF;
+
+    /* Source buffer for the top and bottom regions */
+    const uint8_t *top_src = phase2 ? new_buf : old_buf;
+    const uint8_t *bot_src = phase2 ? new_buf : old_buf;
+
+    /* ── Top portion: vertically compress FLIP_HALF src rows → top_rows ── */
+    for (int dy = 0; dy < top_rows; dy++) {
+        /* Nearest-neighbour downscale: map dst row → src row within top half */
+        int sy = (top_rows > 1) ? (dy * (FLIP_HALF - 1) / (top_rows - 1)) : 0;
+        memcpy(out + (size_t)dy * FLIP_ROW_BYTES,
+               top_src + (size_t)sy * FLIP_ROW_BYTES,
+               FLIP_ROW_BYTES);
+    }
+
+    /* ── Card-edge band: narrow dark strip just below the top portion ── */
+    int edge_end = top_rows + FLIP_EDGE_ROWS;
+    if (edge_end > FLIP_HALF) edge_end = FLIP_HALF;
+    for (int dy = top_rows; dy < edge_end; dy++)
+        memset(out + (size_t)dy * FLIP_ROW_BYTES, 0x10, FLIP_ROW_BYTES);
+
+    /* ── Gap: rows between edge and hinge filled with black ── */
+    for (int dy = edge_end; dy < FLIP_HALF; dy++)
+        memset(out + (size_t)dy * FLIP_ROW_BYTES, 0x00, FLIP_ROW_BYTES);
+
+    /* ── Bottom half: old during phase 1, new during phase 2 ── */
+    memcpy(out  + (size_t)FLIP_HALF * FLIP_ROW_BYTES,
+           bot_src + (size_t)FLIP_HALF * FLIP_ROW_BYTES,
+           (size_t)FLIP_HALF * FLIP_ROW_BYTES);
+}
+
+/* flip_to_image ----------------------------------------------------------
+ * Run the split-flap animation from the cached previous frame to new_buf,
+ * push the final frame, then update the per-tube cache.
+ * Called from display_show_image() when /FlipClock/ is detected.
+ */
+static void flip_to_image(int tube, const uint8_t *new_buf, const char *path)
+{
+    bool path_changed = (strncmp(path,
+                                 s_flip_path[tube],
+                                 sizeof(s_flip_path[tube]) - 1) != 0);
+
+    if (path_changed && s_flip_prev[tube] != NULL) {
+        /* Allocate a temporary working frame in PSRAM */
+        uint8_t *frame = PSRAM_MALLOC(FLIP_FRAME_BYTES);
+        if (frame) {
+            for (int step = 0; step < FLIP_STEPS; step++) {
+                flip_build_frame(frame, s_flip_prev[tube], new_buf, step);
+                /* display_show_digit() SPI transmission (~8 ms) naturally
+                 * paces the animation — no extra vTaskDelay() needed. */
+                display_show_digit(tube, frame, LCD_WIDTH, LCD_HEIGHT);
+            }
+            free(frame);
+        }
+        /* If frame alloc failed: animation silently skipped; final frame
+         * pushed below so the tube still shows the correct image. */
+    }
+
+    /* Always push the final (complete) new frame */
+    display_show_digit(tube, new_buf, LCD_WIDTH, LCD_HEIGHT);
+
+    /* Update per-tube cache -------------------------------------------- */
+    if (!s_flip_prev[tube])
+        s_flip_prev[tube] = PSRAM_MALLOC(FLIP_FRAME_BYTES);
+    if (s_flip_prev[tube])
+        memcpy(s_flip_prev[tube], new_buf, FLIP_FRAME_BYTES);
+
+    strncpy(s_flip_path[tube], path, sizeof(s_flip_path[tube]) - 1);
+    s_flip_path[tube][sizeof(s_flip_path[tube]) - 1] = '\0';
+}
+
+/* flip_prime_blank -------------------------------------------------------
+ * Silently prime the flip animation cache for `tube` with AMPM/blank.jpg,
+ * WITHOUT displaying anything on screen.
+ *
+ * Purpose: when entering weather mode from clock mode (12H), the degree-
+ * symbol tube may have last shown colon.jpg.  Without priming, the flip
+ * animation would show "colon folding into degree-symbol", which looks wrong.
+ * After priming, the animation is "blank folding into degree-symbol", which
+ * is the visually correct split-flap behaviour.
+ *
+ * No-op when:
+ *   • theme is not "FlipClock" (no animation for other themes)
+ *   • cache already holds blank.jpg for this tube (already primed)
+ *   • cache already holds a degree image (temp just changed, no reset needed)
+ */
+static void flip_prime_blank(int tube, const char *theme)
+{
+    if (!theme || strncmp(theme, "FlipClock", 9) != 0) return;
+
+    /* Build the blank.jpg path we would prime with */
+    char blank_path[320];
+    snprintf(blank_path, sizeof(blank_path),
+             "/images/themes/%s/AMPM/blank.jpg", theme);
+
+    /* Skip if the cache already holds blank or a degree image —
+     * animating from blank→blank or degree→degree looks wrong. */
+    if (strstr(s_flip_path[tube], "/AMPM/blank.jpg")      != NULL) return;
+    if (strstr(s_flip_path[tube], "/Temperature/degree")  != NULL) return;
+
+    /* ── Decode blank.jpg → PSRAM and store as the previous frame ── */
+    char full[320];
+    snprintf(full, sizeof(full), "/spiffs%s", blank_path);
+    FILE *f = fopen(full, "rb");
+    if (!f) return;
+
+    fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+    if (sz <= 0 || sz > 200000) { fclose(f); return; }
+
+    uint8_t *jpeg_buf = PSRAM_MALLOC(sz);
+    if (!jpeg_buf) { fclose(f); return; }
+    fread(jpeg_buf, 1, sz, f);
+    fclose(f);
+
+    uint8_t *work_buf = PSRAM_MALLOC(JPEG_WORK_BUF_SIZE);
+    uint8_t *rgb_buf  = PSRAM_MALLOC(FLIP_FRAME_BYTES);
+    if (!work_buf || !rgb_buf) {
+        free(work_buf); free(rgb_buf); free(jpeg_buf); return;
+    }
+
+    esp_jpeg_image_cfg_t dec_cfg = {0};
+    dec_cfg.indata                       = jpeg_buf;
+    dec_cfg.indata_size                  = (uint32_t)sz;
+    dec_cfg.outbuf                       = rgb_buf;
+    dec_cfg.outbuf_size                  = FLIP_FRAME_BYTES;
+    dec_cfg.out_format                   = JPEG_IMAGE_FORMAT_RGB565;
+    dec_cfg.out_scale                    = JPEG_IMAGE_SCALE_0;
+    dec_cfg.flags.swap_color_bytes       = 1;
+    dec_cfg.advanced.working_buffer      = work_buf;
+    dec_cfg.advanced.working_buffer_size = JPEG_WORK_BUF_SIZE;
+
+    esp_jpeg_image_output_t out_img = {0};
+    esp_err_t err = esp_jpeg_decode(&dec_cfg, &out_img);
+
+    free(work_buf);
+    free(jpeg_buf);
+
+    if (err == ESP_OK &&
+        (int)out_img.width == LCD_WIDTH && (int)out_img.height == LCD_HEIGHT) {
+        /* Store decoded blank frame as the "previous" for this tube */
+        if (!s_flip_prev[tube])
+            s_flip_prev[tube] = PSRAM_MALLOC(FLIP_FRAME_BYTES);
+        if (s_flip_prev[tube])
+            memcpy(s_flip_prev[tube], rgb_buf, FLIP_FRAME_BYTES);
+        strncpy(s_flip_path[tube], blank_path, sizeof(s_flip_path[tube]) - 1);
+        s_flip_path[tube][sizeof(s_flip_path[tube]) - 1] = '\0';
+    }
+
     free(rgb_buf);
 }
 
@@ -519,6 +746,14 @@ static void render_weather(const nextube_config_t *cfg)
     bool fahrenheit = (strncmp(cfg->temp_format, "Fahrenheit", 10) == 0);
     const char *unit = fahrenheit ? "degreef" : "degreec";
     const char *icon = (w->icon[0] != '\0') ? w->icon : "sun";
+
+    /* Prime the flip animation cache for the degree-symbol tube so that the
+     * animation transitions from blank.jpg, not from whatever the tube last
+     * displayed (e.g. colon in clock mode).  No-op for non-FlipClock themes
+     * or when the tube already holds a blank/degree image.
+     * Negative double-digit puts the degree symbol on tube 3; all other
+     * layouts put it on tube 2. */
+    flip_prime_blank(negative && temp >= 10 ? 3 : 2, cfg->theme);
 
     if (!negative) {
         /* Tube 0: temperature tens — blank if zero (no leading zero) */
