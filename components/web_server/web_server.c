@@ -27,6 +27,9 @@
 static const char *TAG = "web_srv";
 static httpd_handle_t s_server = NULL;
 
+/* Forward declaration — defined in the static-file section below */
+static const char *content_type(const char *p);
+
 /* ── In-RAM log ring buffer ────────────────────────────────────────── */
 /* Captures all ESP_LOG* output into a circular buffer so the web UI
  * can display recent device logs without a serial connection.
@@ -336,12 +339,18 @@ static esp_err_t api_spiffs_ota(httpd_req_t *r)
 static esp_err_t api_file_ls(httpd_req_t *r)
 {
     char path[128] = "/spiffs";
-    char q[64];
+    char q[128];
     if (httpd_req_get_url_query_str(r, q, sizeof(q)) == ESP_OK) {
         char d[64];
-        if (httpd_query_key_value(q, "dir", d, sizeof(d)) == ESP_OK)
+        if (httpd_query_key_value(q, "dir", d, sizeof(d)) == ESP_OK && d[0] != '\0')
             snprintf(path, sizeof(path), "/spiffs%s", d);
     }
+    /* Strip trailing slash — ESP-IDF SPIFFS opendir() is sensitive to it.
+     * Never strip below "/spiffs" (len=7). */
+    int plen = (int)strlen(path);
+    while (plen > 7 && path[plen - 1] == '/')
+        path[--plen] = '\0';
+
     cJSON *arr = cJSON_CreateArray();
     DIR *dp = opendir(path);
     if (dp) {
@@ -349,9 +358,18 @@ static esp_err_t api_file_ls(httpd_req_t *r)
         while ((e = readdir(dp))) {
             cJSON *it = cJSON_CreateObject();
             cJSON_AddStringToObject(it, "name", e->d_name);
-            char fp[400]; snprintf(fp, sizeof(fp), "%s/%s", path, e->d_name);
-            struct stat st;
-            if (stat(fp, &st)==0) cJSON_AddNumberToObject(it, "size", st.st_size);
+            /* Use d_type from readdir — more reliable than stat() for SPIFFS
+             * virtual directories where stat() fails with ENOENT. */
+            if (e->d_type == DT_DIR) {
+                cJSON_AddStringToObject(it, "type", "dir");
+            } else {
+                cJSON_AddStringToObject(it, "type", "file");
+                char fp[400];
+                snprintf(fp, sizeof(fp), "%s/%s", path, e->d_name);
+                struct stat st;
+                if (stat(fp, &st) == 0)
+                    cJSON_AddNumberToObject(it, "size", st.st_size);
+            }
             cJSON_AddItemToArray(arr, it);
         }
         closedir(dp);
@@ -360,6 +378,95 @@ static esp_err_t api_file_ls(httpd_req_t *r)
     esp_err_t ret = send_json(r, json);
     free(json); cJSON_Delete(arr);
     return ret;
+}
+
+/* GET /api/file/download?path=/images/themes/foo/1.jpg
+ * Streams the file as a download attachment. */
+static esp_err_t api_file_download(httpd_req_t *r)
+{
+    char q[256], p[256] = {0}, spiffs_path[320];
+    if (httpd_req_get_url_query_str(r, q, sizeof(q)) != ESP_OK ||
+        httpd_query_key_value(q, "path", p, sizeof(p)) != ESP_OK || p[0] == '\0')
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Missing path"), ESP_FAIL;
+    if (strstr(p, ".."))
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Invalid path"), ESP_FAIL;
+
+    snprintf(spiffs_path, sizeof(spiffs_path), "/spiffs%s", p);
+    FILE *f = fopen(spiffs_path, "rb");
+    if (!f) return httpd_resp_send_err(r, HTTPD_404_NOT_FOUND, "Not found"), ESP_FAIL;
+
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    httpd_resp_set_type(r, content_type(p));
+    httpd_resp_set_hdr(r, "Access-Control-Allow-Origin", "*");
+    const char *fname = strrchr(p, '/'); fname = fname ? fname + 1 : p;
+    char disp[160];
+    snprintf(disp, sizeof(disp), "attachment; filename=\"%s\"", fname);
+    httpd_resp_set_hdr(r, "Content-Disposition", disp);
+    char clen[24]; snprintf(clen, sizeof(clen), "%ld", sz);
+    httpd_resp_set_hdr(r, "Content-Length", clen);
+
+    char *buf = malloc(2048);
+    if (!buf) { fclose(f); return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL; }
+    size_t rd;
+    while ((rd = fread(buf, 1, 2048, f)) > 0)
+        httpd_resp_send_chunk(r, buf, rd);
+    httpd_resp_send_chunk(r, NULL, 0);
+    free(buf); fclose(f);
+    return ESP_OK;
+}
+
+/* POST /api/file/upload?path=/audio/click.wav
+ * Writes the raw request body to the given SPIFFS path, creating or
+ * overwriting the file.  Directory components must already exist (SPIFFS
+ * creates them implicitly via path-prefix emulation). */
+static esp_err_t api_file_upload(httpd_req_t *r)
+{
+    char q[256], p[256] = {0}, spiffs_path[320];
+    if (httpd_req_get_url_query_str(r, q, sizeof(q)) != ESP_OK ||
+        httpd_query_key_value(q, "path", p, sizeof(p)) != ESP_OK || p[0] == '\0')
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Missing path"), ESP_FAIL;
+    if (strstr(p, ".."))
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Invalid path"), ESP_FAIL;
+
+    snprintf(spiffs_path, sizeof(spiffs_path), "/spiffs%s", p);
+    FILE *f = fopen(spiffs_path, "wb");
+    if (!f) return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "Cannot create file"), ESP_FAIL;
+
+    char *buf = malloc(2048);
+    if (!buf) { fclose(f); return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL; }
+    int received = 0, n;
+    while ((n = httpd_req_recv(r, buf, 2048)) > 0) {
+        fwrite(buf, 1, n, f);
+        received += n;
+    }
+    free(buf); fclose(f);
+
+    if (n < 0) { remove(spiffs_path); return ESP_FAIL; }
+    ESP_LOGI(TAG, "Uploaded: %s (%d bytes)", spiffs_path, received);
+    return send_json(r, "{\"status\":\"ok\"}");
+}
+
+/* DELETE /api/file/delete?path=/audio/click.wav
+ * Removes the file.  config.json is protected. */
+static esp_err_t api_file_delete(httpd_req_t *r)
+{
+    char q[256], p[256] = {0}, spiffs_path[320];
+    if (httpd_req_get_url_query_str(r, q, sizeof(q)) != ESP_OK ||
+        httpd_query_key_value(q, "path", p, sizeof(p)) != ESP_OK || p[0] == '\0')
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Missing path"), ESP_FAIL;
+    if (strstr(p, ".."))
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Invalid path"), ESP_FAIL;
+    if (strcmp(p, "/config.json") == 0)
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Protected file"), ESP_FAIL;
+
+    snprintf(spiffs_path, sizeof(spiffs_path), "/spiffs%s", p);
+    if (remove(spiffs_path) != 0)
+        return httpd_resp_send_err(r, HTTPD_404_NOT_FOUND, "Not found"), ESP_FAIL;
+    ESP_LOGI(TAG, "Deleted: %s", spiffs_path);
+    return send_json(r, "{\"status\":\"ok\"}");
 }
 
 /* ── Log ring API ──────────────────────────────────────────────────── */
@@ -485,8 +592,11 @@ static const httpd_uri_t uris[] = {
     R(HTTP_GET,  "/api/status",          api_status),
     R(HTTP_POST, "/api/update_firmware", api_ota),
     R(HTTP_POST, "/api/update_spiffs",   api_spiffs_ota),
-    R(HTTP_GET,  "/api/file/ls",         api_file_ls),
-    R(HTTP_POST, "/api/wifi/scan",       api_wifi_scan_post),
+    R(HTTP_GET,    "/api/file/ls",         api_file_ls),
+    R(HTTP_GET,    "/api/file/download",  api_file_download),
+    R(HTTP_POST,   "/api/file/upload",    api_file_upload),
+    R(HTTP_DELETE, "/api/file/delete",    api_file_delete),
+    R(HTTP_POST,   "/api/wifi/scan",      api_wifi_scan_post),
     R(HTTP_GET,  "/api/wifi/scan",       api_wifi_scan_get),
     R(HTTP_GET,  "/api/logs",            api_get_logs),
     R(HTTP_POST, "/api/logs/clear",      api_clear_logs),

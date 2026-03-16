@@ -181,7 +181,7 @@ static void audio_play_task(void *arg)
     uint8_t *buf = NULL;
 
     /* ── Open file ── */
-    FILE *f = fopen(path, "r");
+    FILE *f = fopen(path, "rb");
     if (!f) {
         ESP_LOGE(TAG, "Cannot open audio file: %s", path);
         goto task_exit;
@@ -325,7 +325,7 @@ void audio_play_file(const char *path)
     a->path[sizeof(a->path) - 1] = '\0';
 
     BaseType_t rc = xTaskCreate(audio_play_task, "audio_play",
-                                4096, a, 5, &s_audio_task);
+                                8192, a, 5, &s_audio_task);
     if (rc != pdPASS) {
         ESP_LOGE(TAG, "Failed to create audio_play task");
         free(a);

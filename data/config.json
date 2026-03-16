@@ -35,7 +35,7 @@
   "time_zone": -21600,
   "City": "",
   "temperature_formate": "Celsius",
-  "music_file": "/spiffs/audio/Unwritten.mp3",
+  "music_file": "",
   "bell_file": "/spiffs/audio/bell.wav",
   "tone_file": "/spiffs/audio/tremolo3.wav",
   "timer_file": "/spiffs/audio/timer.wav",

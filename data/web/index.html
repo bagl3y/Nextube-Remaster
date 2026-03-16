@@ -306,9 +306,11 @@ select option{background:var(--accent);color:var(--text)}
     <h2>SPIFFS Files</h2>
     <div id="file-breadcrumb" style="font-size:.8rem;color:var(--dim);margin-bottom:.5rem;min-height:1.2em"></div>
     <div id="file-list" style="font-size:.85rem;max-height:320px;overflow-y:auto;border:1px solid rgba(255,255,255,.07);border-radius:6px"></div>
+    <input type="file" id="upload-input" style="display:none" onchange="uploadFile()">
     <div class="btn-group" style="margin-top:.7rem">
       <button class="btn btn-outline" onclick="browseDir('/')">Browse</button>
       <button class="btn btn-outline" onclick="browseDir(s_filePath)">Refresh</button>
+      <button class="btn btn-outline" onclick="$('upload-input').click()">⬆ Upload File</button>
     </div>
   </div>
   <div class="card">
@@ -634,7 +636,6 @@ function doSPIFFSOTA() {
 
 /* ── SPIFFS file browser ───────────────────────────── */
 let s_filePath = '/';
-let s_fileHistory = [];
 
 async function browseDir(dir) {
   dir = dir || '/';
@@ -649,8 +650,8 @@ async function browseDir(dir) {
   let built = '';
   parts.forEach(p => {
     built += '/' + p;
-    const path = built;
-    crumbHtml += ` › <span style="cursor:pointer;color:var(--hi)" onclick="browseDir('${path}')">${p}</span>`;
+    const seg = built;
+    crumbHtml += ` › <span style="cursor:pointer;color:var(--hi)" onclick="browseDir('${seg}')">${p}</span>`;
   });
   $('file-breadcrumb').innerHTML = crumbHtml;
 
@@ -665,20 +666,32 @@ async function browseDir(dir) {
     </div>`;
   }
 
-  if (files.length === 0 && dir === '/') {
-    rows = '<div style="padding:.6rem .8rem;color:var(--dim);font-style:italic">No files</div>';
+  if (files.length === 0) {
+    rows += '<div style="padding:.6rem .8rem;color:var(--dim);font-style:italic">No files</div>';
   } else {
     files.forEach(f => {
-      const isDir = !f.size;
+      const isDir = f.type === 'dir';
       const sizeStr = isDir ? 'folder' : (f.size < 1024 ? f.size + ' B' : (f.size/1024).toFixed(1) + ' K');
       const icon = isDir ? '📁' : '📄';
       const fullPath = (dir.replace(/\/$/, '') + '/' + f.name);
-      const click = isDir ? `browseDir('${fullPath}')` : '';
-      const cursor = isDir ? 'cursor:pointer' : '';
-      rows += `<div class="file-row" onclick="${click}" style="${cursor}">
-        <span>${icon} ${f.name}</span>
-        <span style="color:var(--dim);font-size:.8rem">${sizeStr}</span>
-      </div>`;
+      if (isDir) {
+        rows += `<div class="file-row" onclick="browseDir('${fullPath}')" style="cursor:pointer">
+          <span>${icon} ${f.name}</span>
+          <span style="color:var(--dim);font-size:.8rem">${sizeStr}</span>
+        </div>`;
+      } else {
+        const enc = encodeURIComponent(fullPath);
+        rows += `<div class="file-row">
+          <span>${icon} ${f.name}</span>
+          <span style="display:flex;align-items:center;gap:.5rem">
+            <span style="color:var(--dim);font-size:.8rem">${sizeStr}</span>
+            <a href="/api/file/download?path=${enc}" download="${f.name}"
+               style="font-size:.75rem;color:var(--ok);text-decoration:none;padding:.15rem .4rem;border:1px solid var(--ok);border-radius:4px">⬇</a>
+            <button onclick="deleteFile('${fullPath}')"
+               style="font-size:.75rem;color:var(--hi);background:none;border:1px solid var(--hi);border-radius:4px;padding:.15rem .4rem;cursor:pointer">✕</button>
+          </span>
+        </div>`;
+      }
     });
   }
 
@@ -687,6 +700,37 @@ async function browseDir(dir) {
 
 /* Keep backward-compat alias used by auto-load on tab switch */
 function loadFiles() { browseDir(s_filePath); }
+
+/* ── Delete a SPIFFS file ──────────────────────────── */
+async function deleteFile(path) {
+  const name = path.split('/').pop();
+  if (!confirm(`Delete ${name}?`)) return;
+  try {
+    const r = await fetch('/api/file/delete?path=' + encodeURIComponent(path), { method: 'DELETE' });
+    const d = await r.json();
+    if (d.status === 'ok') { toast('Deleted ' + name); browseDir(s_filePath); }
+    else toast('Delete failed', true);
+  } catch(e) { toast('Delete error: ' + e.message, true); }
+}
+
+/* ── Upload a file to current SPIFFS directory ─────── */
+async function uploadFile() {
+  const input = $('upload-input');
+  const file = input.files[0];
+  if (!file) return;
+  const destPath = (s_filePath.replace(/\/$/, '') + '/' + file.name);
+  toast('Uploading ' + file.name + '…');
+  try {
+    const r = await fetch('/api/file/upload?path=' + encodeURIComponent(destPath), {
+      method: 'POST',
+      body: file
+    });
+    const d = await r.json();
+    if (d.status === 'ok') { toast('Uploaded ' + file.name); browseDir(s_filePath); }
+    else toast('Upload failed', true);
+  } catch(e) { toast('Upload error: ' + e.message, true); }
+  input.value = '';  /* reset so the same file can be re-uploaded */
+}
 
 /* ── Device logs ───────────────────────────────────── */
 let s_logAuto = false;

@@ -55,7 +55,7 @@ static void set_defaults(void)
     strcpy(s_cfg.youtube_key, "");
     strcpy(s_cfg.bili_uid, "1");
 
-    strcpy(s_cfg.music_file, "/spiffs/audio/Unwritten.mp3");
+    strcpy(s_cfg.music_file, "");
     strcpy(s_cfg.bell_file, "/spiffs/audio/bell.wav");
     strcpy(s_cfg.tone_file, "/spiffs/audio/tremolo3.wav");
     strcpy(s_cfg.timer_file, "/spiffs/audio/timer.wav");
