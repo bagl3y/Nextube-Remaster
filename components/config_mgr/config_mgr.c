@@ -30,10 +30,9 @@ static void set_defaults(void)
     s_cfg.led_brightness  = 60;
     s_cfg.backlight_mode  = BL_MODE_BREATH;
     s_cfg.backlight_on    = true;
-    /* All modes enabled by default except Custom Clock (bit 5).
-     * Custom Clock is an opt-in alternative to Clock; having both active
-     * at once just clutters the touch cycle for new users. */
-    s_cfg.enabled_modes   = 0xFF & ~(1 << APP_MODE_CUSTOM_CLOCK);  /* 0xDF */
+    /* All modes enabled by default. Clock and Date are independent — both
+     * can be active simultaneously in the touch cycle. */
+    s_cfg.enabled_modes   = 0xFF;
 
     /* Default rainbow-ish backlight colours */
     uint8_t defaults[6][3] = {
@@ -122,7 +121,8 @@ static void parse_json(const char *json)
         else if (strcmp(app_name, "Scoreboard")  == 0) s_cfg.current_mode = APP_MODE_SCOREBOARD;
         else if (strcmp(app_name, "Pomodoro")    == 0) s_cfg.current_mode = APP_MODE_POMODORO;
         else if (strcmp(app_name, "YouTube")     == 0) s_cfg.current_mode = APP_MODE_YOUTUBE;
-        else if (strcmp(app_name, "CustomClock") == 0) s_cfg.current_mode = APP_MODE_CUSTOM_CLOCK;
+        else if (strcmp(app_name, "Date")        == 0) s_cfg.current_mode = APP_MODE_CUSTOM_CLOCK;
+        else if (strcmp(app_name, "CustomClock") == 0) s_cfg.current_mode = APP_MODE_CUSTOM_CLOCK; /* legacy alias */
         else if (strcmp(app_name, "Album")       == 0) s_cfg.current_mode = APP_MODE_ALBUM;
         else if (strcmp(app_name, "Weather")     == 0) s_cfg.current_mode = APP_MODE_WEATHER;
 
@@ -188,13 +188,13 @@ static void parse_json(const char *json)
     }
 
     json_read_u8(root, "enabled_modes", &s_cfg.enabled_modes);
-    /* Clock and Custom Clock are mutually exclusive in the UI.  Enforce that
-     * at least one clock mode is always active so the device can never be
-     * stuck with no way to show the time. */
+    /* Clock and Date are independent — both may be enabled simultaneously.
+     * Safety fallback: if the user has disabled every time-display mode,
+     * re-enable Clock so the device can always show the time. */
     {
-        bool has_clock  = (s_cfg.enabled_modes & (1 << APP_MODE_CLOCK))        != 0;
-        bool has_custom = (s_cfg.enabled_modes & (1 << APP_MODE_CUSTOM_CLOCK)) != 0;
-        if (!has_clock && !has_custom)
+        bool has_clock = (s_cfg.enabled_modes & (1 << APP_MODE_CLOCK))        != 0;
+        bool has_date  = (s_cfg.enabled_modes & (1 << APP_MODE_CUSTOM_CLOCK)) != 0;
+        if (!has_clock && !has_date)
             s_cfg.enabled_modes |= (1 << APP_MODE_CLOCK);
     }
 
@@ -299,7 +299,7 @@ char *config_to_json(void)
     cJSON_AddStringToObject(app0, "name", "app1");
 
     const char *mode_names[] = {"Clock","Countdown","Scoreboard","Pomodoro",
-                                "YouTube","CustomClock","Album","Weather"};
+                                "YouTube","Date","Album","Weather"};
     int mode_idx = (int)s_cfg.current_mode;
     if (mode_idx < 0 || mode_idx >= (int)(sizeof(mode_names)/sizeof(mode_names[0])))
         mode_idx = 0;

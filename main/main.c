@@ -61,7 +61,7 @@ static void on_touch(touch_pad_id_t pad)
 {
     const nextube_config_t *cfg = config_get();
     static const char *mode_names[] = {
-        "Clock","Countdown","Scoreboard","Pomodoro","YouTube","CustomClock","Album","Weather"
+        "Clock","Countdown","Scoreboard","Pomodoro","YouTube","Date","Album","Weather"
     };
     char json[80];
 

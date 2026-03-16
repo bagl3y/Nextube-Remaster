@@ -95,9 +95,17 @@ static void yt_bili_task(void *arg)
     vTaskDelay(pdMS_TO_TICKS(20000));
     while (1) {
         const nextube_config_t *cfg = config_get();
-        if (strcmp(cfg->video_site, "bilibili") == 0) fetch_bilibili();
-        else fetch_youtube();
-        ESP_LOGI(TAG, "Subscriber count: %lu (valid=%d)", (unsigned long)s_sub.subscriber_count, s_sub.valid);
+        bool is_bili = (strcmp(cfg->video_site, "bilibili") == 0);
+        bool configured = is_bili ? (strlen(cfg->bili_uid) > 0)
+                                  : (strlen(cfg->youtube_id) > 0 && strlen(cfg->youtube_key) > 0);
+        if (configured) {
+            if (is_bili) fetch_bilibili();
+            else         fetch_youtube();
+            ESP_LOGI(TAG, "Subscriber count: %lu (valid=%d)",
+                     (unsigned long)s_sub.subscriber_count, s_sub.valid);
+        } else {
+            ESP_LOGD(TAG, "Not configured — skipping fetch");
+        }
         vTaskDelay(pdMS_TO_TICKS(300000));  /* Every 5 minutes */
     }
 }

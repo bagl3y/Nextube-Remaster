@@ -211,7 +211,7 @@ static esp_err_t api_status(httpd_req_t *r)
     }
     cJSON_AddStringToObject(root, "spiffs_version", spiffs_ver);
     const nextube_config_t *cfg = config_get();
-    const char *modes[] = {"Clock","Countdown","Scoreboard","Pomodoro","YouTube","CustomClock","Album","Weather"};
+    const char *modes[] = {"Clock","Countdown","Scoreboard","Pomodoro","YouTube","Date","Album","Weather"};
     int mode_idx = (int)cfg->current_mode;
     if (mode_idx < 0 || mode_idx >= (int)(sizeof(modes)/sizeof(modes[0]))) mode_idx = 0;
     cJSON_AddStringToObject(root, "mode", modes[mode_idx]);
