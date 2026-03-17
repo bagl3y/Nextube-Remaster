@@ -23,6 +23,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <errno.h>
 
 static const char *TAG = "web_srv";
 static httpd_handle_t s_server = NULL;
@@ -296,6 +297,17 @@ static esp_err_t api_spiffs_ota(httpd_req_t *r)
      * from firmware (app partition), so it stays alive. */
     esp_vfs_spiffs_unregister("spiffs");
 
+/* Re-mount SPIFFS and return an error response.  Called on any flash
+ * failure so the VFS is never left dead after a failed SPIFFS OTA. */
+#define SPIFFS_OTA_FAIL(msg) do { \
+    free(buf); \
+    esp_vfs_spiffs_conf_t _c = { \
+        .base_path = "/spiffs", .partition_label = "spiffs", \
+        .max_files = 20, .format_if_mount_failed = true }; \
+    esp_vfs_spiffs_register(&_c); \
+    return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, (msg)), ESP_FAIL; \
+} while(0)
+
     int written = 0;
     while (written < content_len) {
         /* Fill one sector from the network stream */
@@ -310,24 +322,19 @@ static esp_err_t api_spiffs_ota(httpd_req_t *r)
         int rx = 0;
         while (rx < to_recv) {
             int n = httpd_req_recv(r, buf + rx, to_recv - rx);
-            if (n <= 0) { free(buf); return ESP_FAIL; }
+            if (n <= 0) { SPIFFS_OTA_FAIL("Receive failed"); }
             rx += n;
         }
 
         /* Erase this sector then write it */
-        if (esp_partition_erase_range(part, written, SPIFFS_SECTOR) != ESP_OK) {
-            free(buf);
-            return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR,
-                                       "Erase failed"), ESP_FAIL;
-        }
-        if (esp_partition_write(part, written, buf, SPIFFS_SECTOR) != ESP_OK) {
-            free(buf);
-            return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR,
-                                       "Write failed"), ESP_FAIL;
-        }
+        if (esp_partition_erase_range(part, written, SPIFFS_SECTOR) != ESP_OK)
+            SPIFFS_OTA_FAIL("Erase failed");
+        if (esp_partition_write(part, written, buf, SPIFFS_SECTOR) != ESP_OK)
+            SPIFFS_OTA_FAIL("Write failed");
         written += rx;
     }
     free(buf);
+#undef SPIFFS_OTA_FAIL
 
     ESP_LOGI(TAG, "SPIFFS updated: %d bytes written", written);
     send_json(r, "{\"status\":\"ok\",\"message\":\"SPIFFS updated, rebooting...\"}");
@@ -353,6 +360,8 @@ static esp_err_t api_file_ls(httpd_req_t *r)
 
     cJSON *arr = cJSON_CreateArray();
     DIR *dp = opendir(path);
+    if (!dp)
+        ESP_LOGW(TAG, "api_file_ls: opendir(%s) failed: errno=%d (%s)", path, errno, strerror(errno));
     if (dp) {
         struct dirent *e;
         while ((e = readdir(dp))) {
@@ -433,7 +442,14 @@ static esp_err_t api_file_upload(httpd_req_t *r)
 
     snprintf(spiffs_path, sizeof(spiffs_path), "/spiffs%s", p);
     FILE *f = fopen(spiffs_path, "wb");
-    if (!f) return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "Cannot create file"), ESP_FAIL;
+    if (!f) {
+        size_t total = 0, used = 0;
+        esp_spiffs_info("spiffs", &total, &used);
+        ESP_LOGE(TAG, "fopen(%s, wb) failed: errno=%d (%s)  spiffs total=%u used=%u free=%u",
+                 spiffs_path, errno, strerror(errno),
+                 (unsigned)total, (unsigned)used, (unsigned)(total - used));
+        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "Cannot create file"), ESP_FAIL;
+    }
 
     char *buf = malloc(2048);
     if (!buf) { fclose(f); return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL; }
