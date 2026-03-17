@@ -90,9 +90,26 @@ static esp_err_t dac_cont_start(uint32_t sample_rate)
      * a busy-wait that bypasses tick granularity and gives accurate ms-range
      * delays. */
     if (s_dac_one) {
-        for (int v = 128; v >= 0; v -= 2) {
-            dac_oneshot_output_voltage(s_dac_one, (uint8_t)v);
-            esp_rom_delay_us(1000);   /* 1 ms per step, 2-unit steps → 65 steps × 1 ms = 65 ms */
+        /* Quadratic (ease-out) ramp: v(i) = 128·(64-i)²/64²  for i = 0..64
+         *
+         * Why quadratic instead of linear:
+         *   A linear ramp produces equal-sized steps at equal intervals.
+         *   Through the AC-coupled LTK8002D, each step is differentiated and
+         *   heard as a small click; 65 identical clicks at 1ms intervals sound
+         *   like a 1 kHz buzz (the "50% better but still there" pop).
+         *
+         *   A quadratic ramp concentrates large steps at i=0..~30 (where the
+         *   output is near 128 and the transients are masked by surrounding
+         *   silence or the pre-audio period), and produces near-zero or zero
+         *   steps near i=60..64 (due to integer truncation).  The last ~5
+         *   iterations all output v=0, giving ≥5 ms of stable-zero before the
+         *   oneshot→continuous mode switch — any amplifier transient from the
+         *   last real step has fully decayed by the time the switch fires. */
+        for (int i = 0; i < 65; i++) {
+            int r = 64 - i;                               /* 64 → 0 */
+            uint8_t v = (uint8_t)((128 * r * r) / 4096); /* quadratic ease-out */
+            dac_oneshot_output_voltage(s_dac_one, v);
+            esp_rom_delay_us(1000);   /* 1 ms per step → 65 ms total */
         }
         dac_oneshot_del_channel(s_dac_one);
         s_dac_one = NULL;
@@ -165,9 +182,16 @@ static void dac_cont_stop(void)
     if (!s_dac_one) {
         dac_oneshot_config_t one_cfg = { .chan_id = DAC_CHAN_0 };
         if (dac_oneshot_new_channel(&one_cfg, &s_dac_one) == ESP_OK) {
-            for (int v = 0; v <= 128; v += 2) {
-                dac_oneshot_output_voltage(s_dac_one, (uint8_t)v);
-                esp_rom_delay_us(1000);   /* 1 ms per step, 2-unit steps → 65 steps × 1 ms = 65 ms */
+            /* Quadratic (ease-in) ramp: v(i) = 128·i²/64²  for i = 0..64
+             * Mirror of the ramp-down: first ~5 steps are v=0 (integer
+             * truncation) so the DAC stays at 0 for ≥5 ms after the
+             * continuous→oneshot switch before any voltage change begins.
+             * This lets the amplifier settle from the mode-switch transient
+             * before the ramp introduces new signal energy. */
+            for (int i = 0; i < 65; i++) {
+                uint8_t v = (uint8_t)((128 * i * i) / 4096); /* quadratic ease-in */
+                dac_oneshot_output_voltage(s_dac_one, v);
+                esp_rom_delay_us(1000);   /* 1 ms per step → 65 ms total */
             }
             dac_oneshot_output_voltage(s_dac_one, 128);   /* settle at silence */
         }
@@ -441,7 +465,13 @@ task_cleanup:
          *   for long sounds the ring is full and the wait includes the last 512 ms
          *   of the audio file playing out — no user-visible added delay. */
 
-        const size_t   RAMP_BYTES = 256;                     /* 8 ms at 32 kHz */
+        /* DMA end ramp: 2048 samples = 64 ms at 32 kHz.
+         * At hardware resolution each sample changes by 128/2047 ≈ 0.06 DAC
+         * units — far below the amplifier's noise floor, so the fade is
+         * completely inaudible.  Fits inside the 4096-byte DMA window (buf).
+         * (Previously 256 samples = 8 ms, which the AC-coupled amp could
+         * still differentiate into a faint click at the end.) */
+        const size_t   RAMP_BYTES = 2048;                    /* 64 ms at 32 kHz */
         const uint32_t ring_bytes = (uint32_t)DAC_DESC_NUM * DAC_DMA_BUF_SIZE;
 
         /* Build the 128 → 0 ramp (linear, last sample exactly 0). */
