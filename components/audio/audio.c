@@ -90,9 +90,9 @@ static esp_err_t dac_cont_start(uint32_t sample_rate)
      * a busy-wait that bypasses tick granularity and gives accurate ms-range
      * delays. */
     if (s_dac_one) {
-        for (int v = 128; v >= 0; v -= 16) {
+        for (int v = 128; v >= 0; v -= 2) {
             dac_oneshot_output_voltage(s_dac_one, (uint8_t)v);
-            esp_rom_delay_us(2000);   /* 2 ms per step → 18 ms total ramp */
+            esp_rom_delay_us(1000);   /* 1 ms per step, 2-unit steps → 65 steps × 1 ms = 65 ms */
         }
         dac_oneshot_del_channel(s_dac_one);
         s_dac_one = NULL;
@@ -165,9 +165,9 @@ static void dac_cont_stop(void)
     if (!s_dac_one) {
         dac_oneshot_config_t one_cfg = { .chan_id = DAC_CHAN_0 };
         if (dac_oneshot_new_channel(&one_cfg, &s_dac_one) == ESP_OK) {
-            for (int v = 0; v <= 128; v += 16) {
+            for (int v = 0; v <= 128; v += 2) {
                 dac_oneshot_output_voltage(s_dac_one, (uint8_t)v);
-                esp_rom_delay_us(2000);   /* 2 ms per step → 18 ms total ramp */
+                esp_rom_delay_us(1000);   /* 1 ms per step, 2-unit steps → 65 steps × 1 ms = 65 ms */
             }
             dac_oneshot_output_voltage(s_dac_one, 128);   /* settle at silence */
         }
@@ -387,12 +387,14 @@ static void audio_play_task(void *arg)
                                                   &written, pdMS_TO_TICKS(1000));
             int64_t wr_us = esp_timer_get_time() - t_wr;
 
-            /* Normal DMA back-pressure: with an 8×2048-byte ring at dac_rate Hz,
-             * each 4096-byte write blocks ~4096/dac_rate*1000 ms waiting for
-             * 2 descriptors to drain — roughly 128 ms at 32 kHz.  Only warn if
-             * the stall significantly exceeds that, which would indicate the ring
-             * drained (potential gap) or the system is heavily loaded. */
-            if (wr_us > 300000) {
+            /* Stall detection: only flag if the write blocked for longer than
+             * a full ring drain (ring_bytes/dac_rate ≈ 512 ms at 32 kHz) plus
+             * margin.  Normal back-pressure for short files that nearly fill
+             * the ring (e.g. a 500 ms click in a 512 ms ring) can legitimately
+             * block for ~330 ms — well below 700 ms — and produces no gap.
+             * A real problem (DMA stopped, descriptor queue wedged) would
+             * approach or exceed the 1000 ms write timeout. */
+            if (wr_us > 700000) {
                 write_stalls++;
                 ESP_LOGW(TAG, "DAC write stall: %lld ms (frame %u, written=%u/%d)",
                          (long long)(wr_us / 1000), frame,

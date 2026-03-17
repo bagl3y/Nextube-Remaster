@@ -60,9 +60,6 @@ RTC_DATA_ATTR static uint32_t s_warm_boot;
 static void on_touch(touch_pad_id_t pad)
 {
     const nextube_config_t *cfg = config_get();
-    static const char *mode_names[] = {
-        "Clock","Countdown","Scoreboard","Pomodoro","YouTube","Date","Album","Weather"
-    };
     char json[80];
 
     switch (pad) {
@@ -73,7 +70,7 @@ static void on_touch(touch_pad_id_t pad)
             m = (m - 1 + APP_MODE_MAX) % APP_MODE_MAX;
             if (cfg->enabled_modes & (1 << m)) break;
         }
-        snprintf(json, sizeof(json), "{\"apps\":[{\"app\":\"%s\"}]}", mode_names[m]);
+        snprintf(json, sizeof(json), "{\"apps\":[{\"app\":\"%s\"}]}", app_mode_name((app_mode_t)m));
         config_set_json(json, strlen(json));
         break;
     }
@@ -84,7 +81,7 @@ static void on_touch(touch_pad_id_t pad)
             m = (m + 1) % APP_MODE_MAX;
             if (cfg->enabled_modes & (1 << m)) break;
         }
-        snprintf(json, sizeof(json), "{\"apps\":[{\"app\":\"%s\"}]}", mode_names[m]);
+        snprintf(json, sizeof(json), "{\"apps\":[{\"app\":\"%s\"}]}", app_mode_name((app_mode_t)m));
         config_set_json(json, strlen(json));
         break;
     }

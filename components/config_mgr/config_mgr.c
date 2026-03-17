@@ -215,9 +215,14 @@ static void parse_json(const char *json)
         for (int i = 0; i < cnt; i++) {
             cJSON *rgb = cJSON_GetArrayItem(bl_rgb, i);
             if (cJSON_IsArray(rgb) && cJSON_GetArraySize(rgb) >= 3) {
-                s_cfg.backlight_rgb[i][0] = cJSON_GetArrayItem(rgb, 0)->valueint;
-                s_cfg.backlight_rgb[i][1] = cJSON_GetArrayItem(rgb, 1)->valueint;
-                s_cfg.backlight_rgb[i][2] = cJSON_GetArrayItem(rgb, 2)->valueint;
+                cJSON *r = cJSON_GetArrayItem(rgb, 0);
+                cJSON *g = cJSON_GetArrayItem(rgb, 1);
+                cJSON *b = cJSON_GetArrayItem(rgb, 2);
+                if (r && g && b) {
+                    s_cfg.backlight_rgb[i][0] = (uint8_t)r->valueint;
+                    s_cfg.backlight_rgb[i][1] = (uint8_t)g->valueint;
+                    s_cfg.backlight_rgb[i][2] = (uint8_t)b->valueint;
+                }
             }
         }
     }
@@ -298,12 +303,7 @@ char *config_to_json(void)
     cJSON *app0 = cJSON_CreateObject();
     cJSON_AddStringToObject(app0, "name", "app1");
 
-    const char *mode_names[] = {"Clock","Countdown","Scoreboard","Pomodoro",
-                                "YouTube","Date","Album","Weather"};
-    int mode_idx = (int)s_cfg.current_mode;
-    if (mode_idx < 0 || mode_idx >= (int)(sizeof(mode_names)/sizeof(mode_names[0])))
-        mode_idx = 0;
-    cJSON_AddStringToObject(app0, "app",   mode_names[mode_idx]);
+    cJSON_AddStringToObject(app0, "app",   app_mode_name(s_cfg.current_mode));
     cJSON_AddStringToObject(app0, "theme", s_cfg.theme);
     cJSON_AddStringToObject(app0, "type",  s_cfg.time_type);
     cJSON_AddItemToArray(apps, app0);
@@ -382,4 +382,24 @@ void config_reset(void)
     save_to_flash();
     xSemaphoreGive(s_mutex);
     ESP_LOGI(TAG, "Config reset to factory defaults");
+}
+
+/* ── Mode name table ─────────────────────────────────────────────────
+ * Single authoritative mapping from app_mode_t → display string.
+ * Previously duplicated verbatim in main.c, config_mgr.c, and
+ * web_server.c – adding a new mode only requires editing here. */
+const char *app_mode_name(app_mode_t mode)
+{
+    static const char *const names[APP_MODE_MAX] = {
+        [APP_MODE_CLOCK]        = "Clock",
+        [APP_MODE_COUNTDOWN]    = "Countdown",
+        [APP_MODE_SCOREBOARD]   = "Scoreboard",
+        [APP_MODE_POMODORO]     = "Pomodoro",
+        [APP_MODE_YOUTUBE]      = "YouTube",
+        [APP_MODE_CUSTOM_CLOCK] = "Date",
+        [APP_MODE_ALBUM]        = "Album",
+        [APP_MODE_WEATHER]      = "Weather",
+    };
+    if ((unsigned)mode >= APP_MODE_MAX) return names[APP_MODE_CLOCK];
+    return names[mode];
 }

@@ -490,13 +490,6 @@ void display_show_ampm(int tube, const char *name, const char *theme)
     display_show_image(tube, p);
 }
 
-/* Legacy shim */
-void display_show_time(int h, int m, int s, const char *theme)
-{
-    int digits[6] = {h/10, h%10, m/10, m%10, s/10, s%10};
-    for (int i = 0; i < 6; i++) display_show_number(i, digits[i], theme);
-}
-
 /* ════════════════════════════════════════════════════════════════════
  *  Display task – full mode renderer
  * ════════════════════════════════════════════════════════════════════ */
@@ -505,26 +498,6 @@ void display_show_time(int h, int m, int s, const char *theme)
 #include "weather.h"
 #include "youtube_bili.h"
 #include "freertos/semphr.h"
-
-/* Map OpenWeatherMap "main" condition string → asset filename */
-__attribute__((unused)) static const char *weather_icon(const char *cond)
-{
-    if (!cond || !*cond) return "sun";
-    if      (strcasecmp(cond, "Clear")       == 0) return "sun";
-    else if (strcasecmp(cond, "Rain")        == 0) return "rain";
-    else if (strcasecmp(cond, "Drizzle")     == 0) return "rain";
-    else if (strcasecmp(cond, "Snow")        == 0) return "snow";
-    else if (strcasecmp(cond, "Thunderstorm")== 0) return "thunderstorm";
-    else if (strcasecmp(cond, "Fog")         == 0) return "fog";
-    else if (strcasecmp(cond, "Mist")        == 0) return "fog";
-    else if (strcasecmp(cond, "Haze")        == 0) return "fog";
-    else if (strcasecmp(cond, "Clouds")      == 0) return "overcastClouds";
-    else if (strcasecmp(cond, "Tornado")     == 0) return "tornado";
-    else if (strcasecmp(cond, "Sand")        == 0) return "sand";
-    else if (strcasecmp(cond, "Squall")      == 0) return "squalls";
-    else if (strcasecmp(cond, "Ash")         == 0) return "volcanicAsh";
-    return "sun";
-}
 
 /* ── Mode render helpers ────────────────────────────────────────────── */
 
@@ -546,7 +519,6 @@ static void render_clock(const nextube_config_t *cfg, const struct tm *t)
 {
     bool is_12h = (strcmp(cfg->time_type, "12H") == 0);
     int h = t->tm_hour, m = t->tm_min, s = t->tm_sec;
-    char p[256];
 
     if (is_12h) {
         bool pm = (h >= 12);

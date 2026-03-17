@@ -55,9 +55,6 @@ void display_path_system     (char *buf, size_t n, const char *cat,   const char
 void display_show_number(int tube, int digit,        const char *theme);
 void display_show_ampm  (int tube, const char *name, const char *theme);
 
-/** Legacy shim – full rendering is handled by display_task_start(). */
-void display_show_time(int h, int m, int s, const char *theme);
-
 /* ── Display task ──────────────────────────────────────────────────── */
 /** Launch the FreeRTOS display task (core 1, 5 Hz).  Re-renders
  *  whenever mode / time / weather / subscriber count changes.

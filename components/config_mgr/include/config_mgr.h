@@ -111,6 +111,12 @@ void config_reset(void);
  *  Skips modes that are not set in enabled_modes.  Thread-safe. */
 void config_advance_mode(void);
 
+/** Return the canonical display name string for a mode enum value.
+ *  Returns "Clock" for any out-of-range value.
+ *  Single authoritative definition – eliminates duplicate string tables in
+ *  main.c, config_mgr.c, and web_server.c. */
+const char *app_mode_name(app_mode_t mode);
+
 #ifdef __cplusplus
 }
 #endif
