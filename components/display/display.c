@@ -539,7 +539,6 @@ static void render_clock(const nextube_config_t *cfg, const struct tm *t)
         int d[6] = {h/10, h%10, m/10, m%10, s/10, s%10};
         for (int i = 0; i < 6; i++) display_show_number(i, d[i], cfg->theme);
     }
-    (void)p;
 }
 
 static void render_number6(uint32_t value, const char *theme,
