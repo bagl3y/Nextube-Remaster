@@ -248,17 +248,18 @@ static void audio_play_task(void *arg)
              hdr.bits_per_sample, s_volume);
 
     /* ── Upsample factor for low sample-rate files ────────────────────
-     * The ESP32 DAC DMA uses I2S internally with 32× oversampling.
-     * Required clock divider = APB / (sample_rate × 32) = 80 MHz / (rate × 32).
-     * The divider register is 8-bit (max 255), giving a minimum usable rate of
-     * 80,000,000 / (255 × 32) ≈ 9,804 Hz.  8,000 Hz (divider = 312) is out of
-     * range and dac_continuous_new_channels() returns ESP_ERR_INVALID_ARG.
-     * Fix: nearest-neighbour integer upsample to bring dac_rate ≥ 9,900 Hz. */
+     * The ESP32 DAC DMA uses I2S0 internally.  The I2S clock source is
+     * D2PLL (160 MHz), with a 32× multiplier (2 ch × 16-bit slots).
+     * mclk_div = 160 MHz / (sample_rate × 32); the register is 8-bit (max 255).
+     * Minimum rate = 160 000 000 / (255 × 32) ≈ 19 608 Hz.
+     * 8 000 Hz (divider 625) and 16 000 Hz (divider 312) both exceed 255 and
+     * return ESP_ERR_INVALID_ARG from dac_continuous_new_channels().
+     * Fix: integer upsample until dac_rate ≥ 20 000 Hz. */
     uint32_t upsample = 1;
     uint32_t dac_rate = hdr.sample_rate;
-    while (dac_rate < 9900) { upsample <<= 1; dac_rate <<= 1; }
+    while (dac_rate < 20000) { upsample <<= 1; dac_rate <<= 1; }
     if (upsample > 1)
-        ESP_LOGI(TAG, "Upsampling x%u: %u Hz → %u Hz (DAC min ≈9804 Hz)",
+        ESP_LOGI(TAG, "Upsampling x%u: %u Hz → %u Hz (DAC min ≈19608 Hz)",
                  (unsigned)upsample, (unsigned)hdr.sample_rate, (unsigned)dac_rate);
 
     /* ── DMA window in internal SRAM ──────────────────────────────────
