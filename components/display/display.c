@@ -168,37 +168,34 @@ static void flip_to_image(int tube, const uint8_t *new_buf, const char *path);
 /* TJpgDec workspace: ~3100 bytes for JD_FASTDECODE=0 – round up with margin. */
 #define JPEG_WORK_BUF_SIZE  3200
 
-void display_show_image(int tube, const char *path)
+/* ── JPEG decode helper ─────────────────────────────────────────────────
+ * Load + decode one JPEG from SPIFFS into a PSRAM RGB565 buffer.
+ * Writes decoded width/height into *w_out / *h_out (may be NULL).
+ * Returns a heap-allocated PSRAM buffer the caller must free(), or NULL
+ * on any error (file missing, OOM, decode failure). */
+static uint8_t *jpeg_decode_psram(const char *path, int *w_out, int *h_out)
 {
-    if (tube < 0 || tube >= LCD_COUNT || !path) return;
-
-    /* ── 1. Read JPEG file from SPIFFS ─────────────────────────── */
     char full[320];
     snprintf(full, sizeof(full), "/spiffs%s", path);
     FILE *f = fopen(full, "rb");
-    if (!f) {
-        ESP_LOGW(TAG, "Image not found: %s", full);
-        display_fill(tube, 0x0000);
-        return;
-    }
+    if (!f) { ESP_LOGW(TAG, "Image not found: %s", full); return NULL; }
+
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
     fseek(f, 0, SEEK_SET);
-    if (sz <= 0 || sz > 200000) { fclose(f); display_fill(tube, 0x0000); return; }
+    if (sz <= 0 || sz > 200000) { fclose(f); return NULL; }
 
     uint8_t *jpeg_buf = PSRAM_MALLOC(sz);
-    if (!jpeg_buf) { fclose(f); display_fill(tube, 0x0000); return; }
+    if (!jpeg_buf) { fclose(f); return NULL; }
     fread(jpeg_buf, 1, sz, f);
     fclose(f);
 
-    /* ── 2. Decode JPEG → RGB565 big-endian (for ST7735) ────────── */
     uint8_t *work_buf = PSRAM_MALLOC(JPEG_WORK_BUF_SIZE);
     size_t   out_sz   = LCD_WIDTH * LCD_HEIGHT * 2;
     uint8_t *rgb_buf  = PSRAM_MALLOC(out_sz);
 
     if (!work_buf || !rgb_buf) {
-        free(work_buf); free(rgb_buf); free(jpeg_buf);
-        display_fill(tube, 0x0000); return;
+        free(work_buf); free(rgb_buf); free(jpeg_buf); return NULL;
     }
 
     esp_jpeg_image_cfg_t dec_cfg = {0};
@@ -213,27 +210,85 @@ void display_show_image(int tube, const char *path)
     dec_cfg.advanced.working_buffer_size = JPEG_WORK_BUF_SIZE;
 
     esp_jpeg_image_output_t out_img = {0};
-    esp_err_t dec_err = esp_jpeg_decode(&dec_cfg, &out_img);
+    esp_err_t err = esp_jpeg_decode(&dec_cfg, &out_img);
 
     free(work_buf);
     free(jpeg_buf);
 
-    if (dec_err != ESP_OK) {
-        ESP_LOGW(TAG, "JPEG decode failed %d: %s", dec_err, full);
-        free(rgb_buf); display_fill(tube, 0x0000); return;
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "JPEG decode failed %d: %s", err, full);
+        free(rgb_buf); return NULL;
     }
+    if (w_out) *w_out = (int)out_img.width;
+    if (h_out) *h_out = (int)out_img.height;
+    return rgb_buf;
+}
 
-    /* ── 3. Push RGB565 frame to LCD (with FlipClock animation) ────── */
-    if ((int)out_img.width  == LCD_WIDTH  &&
-        (int)out_img.height == LCD_HEIGHT &&
+void display_show_image(int tube, const char *path)
+{
+    if (tube < 0 || tube >= LCD_COUNT || !path) return;
+
+    int w = 0, h = 0;
+    uint8_t *rgb_buf = jpeg_decode_psram(path, &w, &h);
+    if (!rgb_buf) { display_fill(tube, 0x0000); return; }
+
+    /* Push RGB565 frame to LCD (with FlipClock animation) */
+    if (w == LCD_WIDTH && h == LCD_HEIGHT &&
         strstr(path, "/FlipClock/") != NULL) {
-        /* flip_to_image() runs the split-flap animation when the image
-         * has changed, then pushes the final frame and updates the cache. */
         flip_to_image(tube, rgb_buf, path);
     } else {
-        display_show_digit(tube, rgb_buf, (int)out_img.width, (int)out_img.height);
+        display_show_digit(tube, rgb_buf, w, h);
     }
     free(rgb_buf);
+}
+
+/* ── Blended image display ──────────────────────────────────────────────
+ * Decode base_path and overlay_path (both must be LCD_WIDTH × LCD_HEIGHT),
+ * composite them with an OR-blend (overlay's non-black pixels win), and
+ * push the result to the tube.  This produces a degree symbol (from
+ * Temperature/degreec.jpg or degreef.jpg) on top of a blank tube background
+ * (AMPM/blank.jpg) without depending on a pre-composited theme asset.
+ *
+ * OR-blend: result[i] = base[i] | overlay[i]
+ *   • Where the overlay has dark/near-black background bytes (≈ 0x00):
+ *     result ≈ base  →  blank background shows through.
+ *   • Where the overlay has bright symbol pixels (high byte values):
+ *     result ≈ overlay  →  degree symbol shows on top.
+ *
+ * Falls back gracefully: if overlay decode fails, shows base alone;
+ * if base also fails, fills black. */
+static void display_show_image_blended(int tube,
+                                        const char *base_path,
+                                        const char *overlay_path)
+{
+    if (tube < 0 || tube >= LCD_COUNT) return;
+
+    int bw = 0, bh = 0;
+    uint8_t *base = jpeg_decode_psram(base_path, &bw, &bh);
+    if (!base) { display_fill(tube, 0x0000); return; }
+
+    if (bw != LCD_WIDTH || bh != LCD_HEIGHT) {
+        /* Unexpected size — show base as-is */
+        display_show_digit(tube, base, bw, bh);
+        free(base);
+        return;
+    }
+
+    int ow = 0, oh = 0;
+    uint8_t *overlay = jpeg_decode_psram(overlay_path, &ow, &oh);
+    if (overlay && ow == LCD_WIDTH && oh == LCD_HEIGHT) {
+        /* OR-blend: overlay non-black pixels overwrite base */
+        int n = LCD_WIDTH * LCD_HEIGHT * 2;
+        for (int i = 0; i < n; i++)
+            base[i] |= overlay[i];
+        free(overlay);
+    } else {
+        /* Overlay unavailable — show base alone */
+        free(overlay);
+    }
+
+    display_show_digit(tube, base, LCD_WIDTH, LCD_HEIGHT);
+    free(base);
 }
 
 /* ════════════════════════════════════════════════════════════════════
@@ -689,11 +744,12 @@ static void render_album(const nextube_config_t *cfg,
  *     negative double-digit : [-][tens][units][C/F][blank][icon]
  *   Leading zeros are blank.  Negative temps suppress humidity entirely.
  *   All blank slots use AMPM/blank.jpg for a theme-consistent appearance.
- *   Unit: Temperature/degreec.jpg or Temperature/degreef.jpg
+ *   Unit: AMPM/blank.jpg OR-composited with Temperature/degreec.jpg or degreef.jpg
  *   tube  5   : weather icon from MutiInfo/Weather/{icon}.jpg
  *
  * Actual SPIFFS filenames (must match exactly):
  *   Temperature/ : degreec  degreef  minus
+ *   AMPM/        : blank  (used as base layer; degreec/f OR-composited on top)
  *   Weather/     : sun  fewClouds  overcastClouds  fog
  *                  rain  snow  squalls  thunderstorm
  *                  sand  tornado  volcanicAsh
@@ -730,19 +786,19 @@ static void render_weather(const nextube_config_t *cfg)
     /* Tube layout:
      *
      *  Positive (0–99°): leading zero is BLANK, humidity leading zero is BLANK
-     *    [t/blank][units][°C/F][h/blank][hum units][icon]
-     *    e.g. 2°C 92%:   _  2  °C  9  2  ☁
-     *    e.g. 15°C 8%:   1  5  °C  _  8  ☁
+     *    [t/blank][units][C/F][h/blank][hum units][icon]
+     *    e.g. 2°C 92%:   _  2  C  9  2  ☁
+     *    e.g. 15°C 8%:   1  5  C  _  8  ☁
      *
      *  Negative single-digit (-1 to -9°): no humidity shown
-     *    [-][units][°C/F][ _ ][ _ ][icon]
-     *    e.g. -7°C:  -  7  °C  _  _  ☁
+     *    [-][units][C/F][ _ ][ _ ][icon]
+     *    e.g. -7°C:  -  7  C  _  _  ☁
      *
      *  Negative double-digit (-10 to -99°): no humidity shown
-     *    [-][tens][units][°C/F][ _ ][icon]
-     *    e.g. -23°C:  -  2  3  °C  _  ☁
+     *    [-][tens][units][C/F][ _ ][icon]
+     *    e.g. -23°C:  -  2  3  C  _  ☁
      *
-     * Unit symbol: Temperature/degreec.jpg or Temperature/degreef.jpg
+     * Unit indicator: AMPM/c.jpg or AMPM/f.jpg (plain letter, no degree circle).
      */
     bool fahrenheit = (strncmp(cfg->temp_format, "Fahrenheit", 10) == 0);
     const char *unit = fahrenheit ? "degreef" : "degreec";
@@ -756,6 +812,15 @@ static void render_weather(const nextube_config_t *cfg)
      * layouts put it on tube 2. */
     flip_prime_blank(negative && temp >= 10 ? 3 : 2, cfg->theme);
 
+    /* Pre-build the two paths used for the blended unit indicator:
+     *   base    – AMPM/blank.jpg   (theme's empty tube background)
+     *   overlay – Temperature/degreec.jpg or degreef.jpg (degree symbol)
+     * display_show_image_blended() OR-composites them: the degree symbol
+     * (bright pixels) appears on top of the blank background. */
+    char unit_blank_path[256], unit_degree_path[256];
+    display_path_ampm(unit_blank_path, sizeof(unit_blank_path), cfg->theme, "blank");
+    display_path_temperature(unit_degree_path, sizeof(unit_degree_path), cfg->theme, unit);
+
     if (!negative) {
         /* Tube 0: temperature tens — blank if zero (no leading zero) */
         if (temp / 10 == 0) {
@@ -767,9 +832,8 @@ static void render_weather(const nextube_config_t *cfg)
         /* Tube 1: temperature units */
         display_path_number(path, sizeof(path), cfg->theme, temp % 10);
         display_show_image(1, path);
-        /* Tube 2: degree symbol (°C or °F) */
-        display_path_temperature(path, sizeof(path), cfg->theme, unit);
-        display_show_image(2, path);
+        /* Tube 2: degree symbol composited onto blank background */
+        display_show_image_blended(2, unit_blank_path, unit_degree_path);
         /* Tube 3: humidity tens — blank if zero */
         if (hum / 10 == 0) {
             display_show_ampm(3, "blank", cfg->theme);
@@ -781,25 +845,23 @@ static void render_weather(const nextube_config_t *cfg)
         display_path_number(path, sizeof(path), cfg->theme, hum % 10);
         display_show_image(4, path);
     } else if (temp <= 9) {
-        /* Single-digit negative: [-][digit][°C/F][blank][blank][icon] */
+        /* Single-digit negative: [-][digit][C/F][blank][blank][icon] */
         display_path_temperature(path, sizeof(path), cfg->theme, "minus");
         display_show_image(0, path);
         display_path_number(path, sizeof(path), cfg->theme, temp);
         display_show_image(1, path);
-        display_path_temperature(path, sizeof(path), cfg->theme, unit);
-        display_show_image(2, path);
+        display_show_image_blended(2, unit_blank_path, unit_degree_path);
         display_show_ampm(3, "blank", cfg->theme);
         display_show_ampm(4, "blank", cfg->theme);
     } else {
-        /* Double-digit negative: [-][tens][units][°C/F][blank][icon] */
+        /* Double-digit negative: [-][tens][units][C/F][blank][icon] */
         display_path_temperature(path, sizeof(path), cfg->theme, "minus");
         display_show_image(0, path);
         display_path_number(path, sizeof(path), cfg->theme, temp / 10);
         display_show_image(1, path);
         display_path_number(path, sizeof(path), cfg->theme, temp % 10);
         display_show_image(2, path);
-        display_path_temperature(path, sizeof(path), cfg->theme, unit);
-        display_show_image(3, path);
+        display_show_image_blended(3, unit_blank_path, unit_degree_path);
         display_show_ampm(4, "blank", cfg->theme);
     }
 
@@ -809,16 +871,41 @@ static void render_weather(const nextube_config_t *cfg)
 }
 
 /* ── Timer state ────────────────────────────────────────────────────── */
-static TickType_t s_timer_start   = 0;
-static bool       s_pomo_in_break = false;
+static TickType_t s_timer_start       = 0;
+static bool       s_pomo_in_break     = false;
+static bool       s_timer_paused      = false;
+static uint32_t   s_paused_elapsed_ms = 0;   /* elapsed frozen at pause moment */
 static SemaphoreHandle_t s_timer_mutex = NULL;
 
 void display_timer_reset(void)
 {
     if (s_timer_mutex) xSemaphoreTake(s_timer_mutex, portMAX_DELAY);
-    s_timer_start   = xTaskGetTickCount();
-    s_pomo_in_break = false;
+    s_timer_start        = xTaskGetTickCount();
+    s_pomo_in_break      = false;
+    s_timer_paused       = false;
+    s_paused_elapsed_ms  = 0;
     if (s_timer_mutex) xSemaphoreGive(s_timer_mutex);
+}
+
+/* Toggle countdown / pomodoro timer between running and paused.
+ * When pausing  : freeze elapsed_ms so the display stops counting.
+ * When resuming : shift s_timer_start forward so elapsed resumes
+ *                 from the frozen point without any jump. */
+void display_timer_toggle(void)
+{
+    if (!s_timer_mutex) return;
+    xSemaphoreTake(s_timer_mutex, portMAX_DELAY);
+    if (s_timer_paused) {
+        /* Resume: reconstruct start tick so elapsed_ms picks up from freeze */
+        s_timer_start  = xTaskGetTickCount() - pdMS_TO_TICKS(s_paused_elapsed_ms);
+        s_timer_paused = false;
+    } else {
+        /* Pause: freeze current elapsed */
+        s_paused_elapsed_ms = (uint32_t)pdTICKS_TO_MS(
+                                  xTaskGetTickCount() - s_timer_start);
+        s_timer_paused      = true;
+    }
+    xSemaphoreGive(s_timer_mutex);
 }
 
 /* ── Main display task ──────────────────────────────────────────────── */
@@ -914,10 +1001,12 @@ static void display_task(void *arg)
 
         case APP_MODE_COUNTDOWN: {
             xSemaphoreTake(s_timer_mutex, portMAX_DELAY);
-            int32_t elapsed = (int32_t)pdTICKS_TO_MS(xTaskGetTickCount() - s_timer_start) / 1000;
+            uint32_t elapsed_ms = s_timer_paused
+                ? s_paused_elapsed_ms
+                : (uint32_t)pdTICKS_TO_MS(xTaskGetTickCount() - s_timer_start);
             xSemaphoreGive(s_timer_mutex);
             int32_t total  = (int32_t)cfg->countdown_minutes * 60;
-            int32_t remain = total - elapsed;
+            int32_t remain = total - (int32_t)(elapsed_ms / 1000);
             if (remain < 0) remain = 0;
             if (first || mode_changed || theme_changed || remain != last_remain_s) {
                 render_countdown_display(cfg, remain);
@@ -928,22 +1017,30 @@ static void display_task(void *arg)
 
         case APP_MODE_POMODORO: {
             xSemaphoreTake(s_timer_mutex, portMAX_DELAY);
-            int32_t elapsed = (int32_t)pdTICKS_TO_MS(xTaskGetTickCount() - s_timer_start) / 1000;
-            bool in_break   = s_pomo_in_break;
+            bool     paused     = s_timer_paused;
+            uint32_t elapsed_ms = paused
+                ? s_paused_elapsed_ms
+                : (uint32_t)pdTICKS_TO_MS(xTaskGetTickCount() - s_timer_start);
+            bool in_break = s_pomo_in_break;
             xSemaphoreGive(s_timer_mutex);
 
             int32_t period = in_break ? (int32_t)cfg->pomodoro_break * 60
                                       : (int32_t)cfg->pomodoro_work  * 60;
-            int32_t remain = period - elapsed;
+            int32_t remain = period - (int32_t)(elapsed_ms / 1000);
             if (remain <= 0) {
-                /* Flip work/break */
-                xSemaphoreTake(s_timer_mutex, portMAX_DELAY);
-                s_pomo_in_break = !s_pomo_in_break;
-                s_timer_start   = xTaskGetTickCount();
-                in_break        = s_pomo_in_break;
-                xSemaphoreGive(s_timer_mutex);
-                remain = in_break ? (int32_t)cfg->pomodoro_break * 60
-                                  : (int32_t)cfg->pomodoro_work  * 60;
+                if (!paused) {
+                    /* Auto-flip work↔break only while the timer is running */
+                    xSemaphoreTake(s_timer_mutex, portMAX_DELAY);
+                    s_pomo_in_break     = !s_pomo_in_break;
+                    s_timer_start       = xTaskGetTickCount();
+                    s_paused_elapsed_ms = 0;
+                    in_break            = s_pomo_in_break;
+                    xSemaphoreGive(s_timer_mutex);
+                    remain = in_break ? (int32_t)cfg->pomodoro_break * 60
+                                      : (int32_t)cfg->pomodoro_work  * 60;
+                } else {
+                    remain = 0;   /* frozen at zero while paused */
+                }
             }
             if (first || mode_changed || theme_changed || remain != last_remain_s) {
                 render_pomodoro_display(cfg, remain, in_break);

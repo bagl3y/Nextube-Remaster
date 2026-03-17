@@ -64,6 +64,10 @@ void display_task_start(void);
 /** Reset the countdown / pomodoro internal timer (call on mode entry). */
 void display_timer_reset(void);
 
+/** Toggle the countdown / pomodoro timer between running and paused.
+ *  Safe to call from any task; uses an internal mutex. */
+void display_timer_toggle(void);
+
 #ifdef __cplusplus
 }
 #endif
