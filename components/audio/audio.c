@@ -388,13 +388,17 @@ static void audio_play_task(void *arg)
     }
 
 task_cleanup:
-    /* Fade out: write one buffer of silence before stopping the DAC to
-     * prevent the abrupt 0x80→0x00 transient that causes an audible click
-     * at the end of playback. */
+    /* Fade out: write one buffer of silence, then WAIT for it to drain from
+     * the DMA ring before stopping.  Without the wait, dac_continuous_disable()
+     * fires while the silence is still queued — the DMA stops mid-audio and the
+     * DAC snaps from whatever the last sample was directly to the oneshot idle
+     * level (128), which the amplifier hears as a pop on the NEXT playback. */
     if (buf && s_dac_cont) {
         memset(buf, 128, STREAM_BUF_BYTES);
         size_t _fw;
-        dac_continuous_write(s_dac_cont, buf, STREAM_BUF_BYTES, &_fw, pdMS_TO_TICKS(200));
+        dac_continuous_write(s_dac_cont, buf, STREAM_BUF_BYTES, &_fw, pdMS_TO_TICKS(500));
+        /* Block until the ring has drained: STREAM_BUF_BYTES / dac_rate + margin. */
+        vTaskDelay(pdMS_TO_TICKS(STREAM_BUF_BYTES * 1000 / dac_rate + 50));
     }
     free(buf);
     dac_cont_stop();   /* disable continuous, restore oneshot silence */
