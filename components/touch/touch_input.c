@@ -226,7 +226,7 @@ void touch_input_init(void)
                             4, &s_handler_task, 0);
 
     /* Poll task on CPU 0 – away from the display task's JPEG decoding on CPU 1 */
-    xTaskCreatePinnedToCore(touch_poll_task, "touch", 2048, NULL,
+    xTaskCreatePinnedToCore(touch_poll_task, "touch", 3072, NULL,
                             5, &touch_task_handle, 0);
 }
 

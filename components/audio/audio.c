@@ -76,8 +76,16 @@ typedef struct __attribute__((packed)) {
  */
 static esp_err_t dac_cont_start(uint32_t sample_rate)
 {
-    /* Release oneshot so continuous can claim the channel */
+    /* Ramp DAC from mid-rail (128) down to 0 before releasing the oneshot.
+     * When dac_continuous_enable() fires, the DMA ring is zero-filled (0x00).
+     * A hard step from 128→0 is amplified as an audible pop.  A short ramp
+     * (9 steps × 1 ms ≈ 9 ms) brings the output to 0 first so the
+     * oneshot→continuous transition is 0→0 — inaudible. */
     if (s_dac_one) {
+        for (int v = 128; v >= 0; v -= 16) {
+            dac_oneshot_output_voltage(s_dac_one, (uint8_t)v);
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
         dac_oneshot_del_channel(s_dac_one);
         s_dac_one = NULL;
     }
@@ -292,10 +300,15 @@ static void audio_play_task(void *arg)
     {
         size_t prime_bytes = dac_rate / 10;   /* 100 ms of 8-bit mono at dac_rate */
         if (prime_bytes > STREAM_BUF_BYTES) prime_bytes = STREAM_BUF_BYTES;
-        memset(buf, 128, prime_bytes);
+        /* Ramp 0x00→0x80 over the priming window.  The DMA ring starts at
+         * 0x00 (zero-filled by the driver); a flat 0x80 would cause a hard
+         * 0→128 step.  A linear ramp removes this second pop and produces
+         * a smooth fade-in matching the ramp-down done above. */
+        for (size_t i = 0; i < prime_bytes; i++)
+            buf[i] = (uint8_t)(128 * i / prime_bytes);
         size_t _w;
         dac_continuous_write(s_dac_cont, buf, prime_bytes, &_w, pdMS_TO_TICKS(200));
-        ESP_LOGI(TAG, "DMA ring primed with %u bytes of silence (~100 ms)",
+        ESP_LOGI(TAG, "DMA ring primed with %u-byte ramp 0→128 (~100 ms)",
                  (unsigned)prime_bytes);
     }
 

@@ -135,10 +135,18 @@ void display_show_digit(int tube, const uint8_t *data, int w, int h)
     lcd_cmd(0x2B); uint8_t ra[] = {0,LCD_OFFSET_Y,0,LCD_OFFSET_Y+h-1}; lcd_data(ra,4);
     lcd_cmd(0x2C);
     gpio_set_level(PIN_LCD_DC, 1);
-    /* Use interrupt-based transmit so the task yields during DMA, allowing
-     * IDLE1 on CPU1 to reset the task watchdog. */
-    spi_transaction_t t = { .length = w*h*2*8, .tx_buffer = data };
-    spi_device_transmit(spi_dev, &t);
+    /* `data` may be in PSRAM; ESP32 SPI DMA cannot access PSRAM directly.
+     * Sending the whole frame in one transaction forces the SPI driver to
+     * allocate a temporary DMA-capable SRAM copy (25 600 B), which fails
+     * under memory pressure and logs "Failed to allocate priv TX buffer".
+     * Fix: copy one row at a time into a stack-allocated SRAM line buffer
+     * and send via polling transmit — no per-call heap allocation needed. */
+    uint8_t line[LCD_WIDTH * 2];    /* 160 B — always in SRAM, always DMA-safe */
+    for (int y = 0; y < h; y++) {
+        memcpy(line, data + y * w * 2, (size_t)(w * 2));
+        spi_transaction_t t = { .length = (size_t)(w * 2) * 8, .tx_buffer = line };
+        spi_device_polling_transmit(spi_dev, &t);
+    }
     deselect_all();
 }
 
