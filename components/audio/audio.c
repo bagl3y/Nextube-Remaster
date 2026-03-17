@@ -16,9 +16,15 @@
  * immediately.  A mutex serialises concurrent play requests.
  *
  * DAC mode lifecycle:
- *   idle    – oneshot channel holds DAC at 128 (mid-rail = silence)
+ *   idle    – oneshot channel holds DAC at 0 (low rail).
+ *             AC-coupled output: idle voltage doesn't matter; the amp's
+ *             internal bias holds its input at VDD/2 regardless.
+ *             Idling at 0 makes every mode-switch a 0→0 transition —
+ *             matching the DMA ring's zero-initialised state — so no
+ *             oneshot stepping ramp is ever needed.
  *   playing – oneshot deleted, continuous channel streams PCM samples;
- *             on completion oneshot is re-created and restored to 128.
+ *             DMA prime ramp (0→128) and end ramp (128→0) handle the
+ *             transitions silently at audio sample rate.
  */
 
 #include "audio.h"
@@ -35,7 +41,6 @@
 #include <strings.h>    /* strcasecmp */
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
-#include "esp_rom_sys.h"    /* esp_rom_delay_us – sub-tick busy-wait for DAC ramps */
 
 static const char *TAG = "audio";
 
@@ -77,40 +82,24 @@ typedef struct __attribute__((packed)) {
  */
 static esp_err_t dac_cont_start(uint32_t sample_rate)
 {
-    /* Ramp DAC from mid-rail (128) down to 0 before releasing the oneshot.
-     * When dac_continuous_enable() fires, the DMA ring is zero-filled (0x00).
-     * A hard step from 128→0 is amplified as an audible pop.  A short ramp
-     * (9 steps × 2 ms = 18 ms) brings the output to 0 first so the
-     * oneshot→continuous transition is 0→0 — inaudible.
+    /* Idle strategy: DAC is held at 0 (not 128) between sounds.
      *
-     * NOTE: vTaskDelay(pdMS_TO_TICKS(1)) must NOT be used here.  With the
-     * default ESP-IDF FreeRTOS tick rate of 100 Hz, pdMS_TO_TICKS(1) = 0
-     * (integer truncation), so the delay would be 0 ticks = no delay at
-     * all, making the ramp an instantaneous hard step.  esp_rom_delay_us is
-     * a busy-wait that bypasses tick granularity and gives accurate ms-range
-     * delays. */
+     * Why 0 instead of 128 (mid-rail):
+     *   Any discrete step of the oneshot DAC is audible through the
+     *   AC-coupled LTK8002D, regardless of how slowly it is stepped.
+     *   Each step fires through the AC coupling and produces a click;
+     *   65 steps at 1 ms intervals sound like a 1 kHz buzz.
+     *
+     *   Keeping idle at 0 eliminates the oneshot ramp entirely:
+     *   - DMA ring is zero-initialised (0x00) by the driver, matching idle (0).
+     *   - The oneshot→continuous switch is 0→0 — completely silent.
+     *   - When the DAC floats briefly during the mode switch, the AC-coupling
+     *     cap was charged to +VDD/2 (bias = VDD/2, DAC = 0), so the LTK8002D
+     *     input stays at VDD/2 = silence throughout — no transient at all.
+     *   - The DMA prime ramp (0→128, ~100 ms) and end ramp (128→0, 64 ms)
+     *     operate at 32 kHz sample rate; each step is ~0.06 DAC units, which
+     *     the AC coupling treats as a ~8.7 mV DC signal — inaudible. */
     if (s_dac_one) {
-        /* Quadratic (ease-out) ramp: v(i) = 128·(64-i)²/64²  for i = 0..64
-         *
-         * Why quadratic instead of linear:
-         *   A linear ramp produces equal-sized steps at equal intervals.
-         *   Through the AC-coupled LTK8002D, each step is differentiated and
-         *   heard as a small click; 65 identical clicks at 1ms intervals sound
-         *   like a 1 kHz buzz (the "50% better but still there" pop).
-         *
-         *   A quadratic ramp concentrates large steps at i=0..~30 (where the
-         *   output is near 128 and the transients are masked by surrounding
-         *   silence or the pre-audio period), and produces near-zero or zero
-         *   steps near i=60..64 (due to integer truncation).  The last ~5
-         *   iterations all output v=0, giving ≥5 ms of stable-zero before the
-         *   oneshot→continuous mode switch — any amplifier transient from the
-         *   last real step has fully decayed by the time the switch fires. */
-        for (int i = 0; i < 65; i++) {
-            int r = 64 - i;                               /* 64 → 0 */
-            uint8_t v = (uint8_t)((128 * r * r) / 4096); /* quadratic ease-out */
-            dac_oneshot_output_voltage(s_dac_one, v);
-            esp_rom_delay_us(1000);   /* 1 ms per step → 65 ms total */
-        }
         dac_oneshot_del_channel(s_dac_one);
         s_dac_one = NULL;
     }
@@ -140,7 +129,7 @@ static esp_err_t dac_cont_start(uint32_t sample_rate)
         /* Reclaim oneshot so idle silence is restored */
         dac_oneshot_config_t one_cfg = { .chan_id = DAC_CHAN_0 };
         if (dac_oneshot_new_channel(&one_cfg, &s_dac_one) == ESP_OK)
-            dac_oneshot_output_voltage(s_dac_one, 128);
+            dac_oneshot_output_voltage(s_dac_one, 0);   /* idle at 0 */
         return err;
     }
 
@@ -151,21 +140,19 @@ static esp_err_t dac_cont_start(uint32_t sample_rate)
         s_dac_cont = NULL;
         dac_oneshot_config_t one_cfg = { .chan_id = DAC_CHAN_0 };
         if (dac_oneshot_new_channel(&one_cfg, &s_dac_one) == ESP_OK)
-            dac_oneshot_output_voltage(s_dac_one, 128);
+            dac_oneshot_output_voltage(s_dac_one, 0);   /* idle at 0 */
     }
     return err;
 }
 
 /*
- * Transition from continuous mode back to idle (oneshot), leaving DAC
- * at mid-rail (128) to prevent audible clicks or pops.
+ * Transition from continuous mode back to idle (oneshot).
  *
- * dac_continuous_del_channels() disables digi-bypass; the DAC immediately
- * reverts from the last DMA output value to the RTC register value, which
- * was last written to 0 by the start-of-playback ramp-down.  To make this
- * a 0→0 (silent) switch rather than a 128→0 (pop) switch, task_cleanup
- * must end the DMA ring at 0 before calling here.  This function then
- * ramps 0→128 in oneshot to restore mid-rail idle. */
+ * Idle strategy: DAC is held at 0 (low rail) between sounds.
+ * The DMA end ramp in task_cleanup already fades the ring to 0, so
+ * del_channels() fires while the ring output is 0.  The RTC register
+ * also holds 0 (never changed since init), so the digi-bypass switch is
+ * 0→0 — completely silent.  No oneshot ramp is needed. */
 static void dac_cont_stop(void)
 {
     if (s_dac_cont) {
@@ -174,27 +161,11 @@ static void dac_cont_stop(void)
         s_dac_cont = NULL;
     }
 
-    /* Restore oneshot and ramp 0 → 128.
-     * After del_channels the DAC holds the RTC register value (0).
-     * A hard jump to 128 would cause a pop; ramp instead.
-     * Same busy-wait rationale as the ramp-down in dac_cont_start:
-     * pdMS_TO_TICKS(1) = 0 at 100 Hz tick rate → use esp_rom_delay_us. */
+    /* Restore oneshot and hold at 0 (low rail = idle). */
     if (!s_dac_one) {
         dac_oneshot_config_t one_cfg = { .chan_id = DAC_CHAN_0 };
-        if (dac_oneshot_new_channel(&one_cfg, &s_dac_one) == ESP_OK) {
-            /* Quadratic (ease-in) ramp: v(i) = 128·i²/64²  for i = 0..64
-             * Mirror of the ramp-down: first ~5 steps are v=0 (integer
-             * truncation) so the DAC stays at 0 for ≥5 ms after the
-             * continuous→oneshot switch before any voltage change begins.
-             * This lets the amplifier settle from the mode-switch transient
-             * before the ramp introduces new signal energy. */
-            for (int i = 0; i < 65; i++) {
-                uint8_t v = (uint8_t)((128 * i * i) / 4096); /* quadratic ease-in */
-                dac_oneshot_output_voltage(s_dac_one, v);
-                esp_rom_delay_us(1000);   /* 1 ms per step → 65 ms total */
-            }
-            dac_oneshot_output_voltage(s_dac_one, 128);   /* settle at silence */
-        }
+        if (dac_oneshot_new_channel(&one_cfg, &s_dac_one) == ESP_OK)
+            dac_oneshot_output_voltage(s_dac_one, 0);
     }
 }
 
@@ -350,10 +321,12 @@ static void audio_play_task(void *arg)
     {
         size_t prime_bytes = dac_rate / 10;   /* 100 ms of 8-bit mono at dac_rate */
         if (prime_bytes > STREAM_BUF_BYTES) prime_bytes = STREAM_BUF_BYTES;
-        /* Ramp 0x00→0x80 over the priming window.  The DMA ring starts at
-         * 0x00 (zero-filled by the driver); a flat 0x80 would cause a hard
-         * 0→128 step.  A linear ramp removes this second pop and produces
-         * a smooth fade-in matching the ramp-down done above. */
+        /* Ramp 0→128 over the priming window.
+         * The DMA ring starts at 0x00 (zero-filled by the driver) which
+         * matches the idle voltage (0).  A flat jump to 128 would be a hard
+         * 0→128 step through the AC coupling; a slow linear ramp is treated
+         * as a near-DC signal (fundamental ≈ 10 Hz) attenuated by the high-
+         * pass characteristic to ~8.7 mV — inaudible. */
         for (size_t i = 0; i < prime_bytes; i++)
             buf[i] = (uint8_t)(128 * i / prime_bytes);
         size_t _w;
@@ -440,37 +413,21 @@ static void audio_play_task(void *arg)
 
 task_cleanup:
     if (buf && s_dac_cont) {
-        /* ── End-of-playback pop suppression ──────────────────────────────
+        /* ── End-of-playback fade ──────────────────────────────────────────
          *
-         * Hardware root cause:
-         *   dac_continuous_del_channels() calls dac_ll_digi_bypass_enable(false),
-         *   which instantly switches the DAC from the last DMA output value to
-         *   the RTC register.  That register was last written to 0 by the
-         *   start-of-playback ramp-down and has stayed at 0 throughout.
-         *   If the DMA was outputting 128 (mid-rail silence), the switch is
-         *   128 → 0 — a half-rail step that the amplifier hears as a loud pop.
+         * Append a 128→0 linear ramp to the DMA ring so the last sample
+         * output is 0, matching the RTC register (idle = 0).
          *
-         * Fix: append a 256-sample 128→0 fade-down ramp to the DMA ring so the
-         *   ring's last output is 0.  When del_channels fires, the switch is
-         *   0 → 0 (RTC register also 0) — completely silent.  dac_cont_stop()
-         *   then ramps 0→128 in oneshot to restore mid-rail idle.
+         * dac_continuous_del_channels() switches DAC from digi-bypass to the
+         * RTC register.  Because both are 0, the switch is 0→0 — silent.
          *
-         * Drain timing:
-         *   During steady-state playback the ring is nearly full.
-         *   ring_bytes = DAC_DESC_NUM × DAC_DMA_BUF_SIZE (e.g. 16384 B at 32 kHz
-         *   = 512 ms).  The old wait of STREAM_BUF_BYTES/dac_rate (178 ms) expired
-         *   while hundreds of ms of audio were still in the ring → pop mid-audio.
-         *   Correct wait = min(total_bytes_out, ring_bytes) / dac_rate + margin.
-         *   For short sounds total_bytes_out < ring_bytes and the wait is shorter;
-         *   for long sounds the ring is full and the wait includes the last 512 ms
-         *   of the audio file playing out — no user-visible added delay. */
-
-        /* DMA end ramp: 2048 samples = 64 ms at 32 kHz.
-         * At hardware resolution each sample changes by 128/2047 ≈ 0.06 DAC
-         * units — far below the amplifier's noise floor, so the fade is
-         * completely inaudible.  Fits inside the 4096-byte DMA window (buf).
-         * (Previously 256 samples = 8 ms, which the AC-coupled amp could
-         * still differentiate into a faint click at the end.) */
+         * Ramp = 2048 samples = 64 ms at 32 kHz.  Each sample step is
+         * 128/2047 ≈ 0.06 DAC units.  Through the AC-coupled LTK8002D the
+         * ramp's fundamental (≈ 15 Hz) is attenuated to ~8.7 mV — inaudible.
+         *
+         * Drain timing: ring_occ = min(total_bytes_out, ring_bytes).
+         * Wait until the ring (plus the appended ramp) has fully played out
+         * before issuing del_channels. */
         const size_t   RAMP_BYTES = 2048;                    /* 64 ms at 32 kHz */
         const uint32_t ring_bytes = (uint32_t)DAC_DESC_NUM * DAC_DMA_BUF_SIZE;
 
@@ -481,13 +438,9 @@ task_cleanup:
         size_t _fw;
         dac_continuous_write(s_dac_cont, buf, RAMP_BYTES, &_fw, pdMS_TO_TICKS(500));
 
-        /* Wait for the ring to fully drain.  ring_occ = bytes currently
-         * queued = min(total_bytes_out, ring_bytes).  The ramp write blocked
-         * until RAMP_BYTES bytes of space were available and then filled them
-         * back, so occupancy is unchanged after the write. */
         uint32_t ring_occ = (total_bytes_out < ring_bytes) ? total_bytes_out : ring_bytes;
         vTaskDelay(pdMS_TO_TICKS(ring_occ * 1000 / dac_rate + 150));
-        /* DAC is now at 0; dac_cont_stop() switches 0→0 and ramps 0→128. */
+        /* DAC is now at 0; dac_cont_stop() switches 0→0, restores oneshot at 0. */
     }
     free(buf);
     dac_cont_stop();
@@ -516,17 +469,14 @@ void audio_init(void)
 
     ESP_LOGI(TAG, "Audio init – DAC GPIO%d", PIN_AUDIO_DAC);
 
-    /* Start in oneshot mode so we can set an idle DC level (silence) */
+    /* Start in oneshot mode.  Idle at 0 (low rail).
+     * AC-coupling means idle voltage has no bearing on silence: the cap
+     * blocks DC and the LTK8002D biases its input to VDD/2 regardless.
+     * Idling at 0 means mode-switch transients (0→float→0) produce no
+     * voltage change at the amp input — no pop at start or end of sound. */
     dac_oneshot_config_t one_cfg = { .chan_id = DAC_CHAN_0 };
     ESP_ERROR_CHECK(dac_oneshot_new_channel(&one_cfg, &s_dac_one));
-    /* Ramp 0 → 128 over ~32 ms to suppress the LTK8002D power-on pop.
-     * A hard step from the DAC's undefined power-on state to mid-rail
-     * is amplified and audible as a click; a slow ramp is inaudible. */
-    for (int v = 0; v <= 128; v += 4) {
-        dac_oneshot_output_voltage(s_dac_one, (uint8_t)v);
-        vTaskDelay(1);   /* 1 tick ≈ 1 ms → 32 steps × 1 ms ≈ 32 ms total */
-    }
-    dac_oneshot_output_voltage(s_dac_one, 128);   /* settle at mid-rail = silence */
+    dac_oneshot_output_voltage(s_dac_one, 0);
 
     /* Binary semaphore (no task-ownership enforcement).
      * A mutex requires that the same task which called xSemaphoreTake also
@@ -617,7 +567,7 @@ void audio_stop(void)
     /* Poll briefly for playback task to finish (it gives the mutex on exit) */
     for (int i = 0; i < 30 && s_audio_task != NULL; i++)
         vTaskDelay(pdMS_TO_TICKS(10));
-    /* Guarantee silence on DAC output */
+    /* Guarantee idle state on DAC output */
     if (s_dac_one)
-        dac_oneshot_output_voltage(s_dac_one, 128);
+        dac_oneshot_output_voltage(s_dac_one, 0);
 }

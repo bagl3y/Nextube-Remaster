@@ -130,7 +130,7 @@ static void fetch_wttr(const nextube_config_t *cfg)
             }
         }
         s_weather.valid = true;
-        ESP_LOGI(TAG, "wttr.in: %.1f°C  %d%%  %s",
+        ESP_LOGI(TAG, "wttr.in: %.0f°C  %d%%  %s",
                  s_weather.temp_c, (int)s_weather.humidity, s_weather.condition);
     }
     cJSON_Delete(root);
@@ -189,7 +189,7 @@ static void fetch_openweather(const nextube_config_t *cfg)
         }
     }
     s_weather.valid = true;
-    ESP_LOGI(TAG, "OWM: %.1f°C  %d%%  %s",
+    ESP_LOGI(TAG, "OWM: %.0f°C  %d%%  %s",
              s_weather.temp_c, (int)s_weather.humidity, s_weather.condition);
     cJSON_Delete(root);
 }
@@ -370,7 +370,7 @@ static void fetch_open_meteo(const nextube_config_t *cfg)
             strncpy(s_weather.condition, wmo_condition(code),  sizeof(s_weather.condition) - 1);
         }
         s_weather.valid = true;
-        ESP_LOGI(TAG, "Open-Meteo: %.1f°C  %d%%  %s",
+        ESP_LOGI(TAG, "Open-Meteo: %.0f°C  %d%%  %s",
                  s_weather.temp_c, (int)s_weather.humidity, s_weather.condition);
     }
     cJSON_Delete(root);
@@ -552,7 +552,7 @@ static void fetch_met_no(const nextube_config_t *cfg)
         strncpy(s_weather.condition, metno_condition(symbol),  sizeof(s_weather.condition) - 1);
     }
     s_weather.valid = true;
-    ESP_LOGI(TAG, "Met.no: %.1f°C  %d%%  %s",
+    ESP_LOGI(TAG, "Met.no: %.0f°C  %d%%  %s",
              s_weather.temp_c, (int)s_weather.humidity, s_weather.condition);
 }
 

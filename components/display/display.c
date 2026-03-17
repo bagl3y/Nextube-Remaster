@@ -976,9 +976,21 @@ static void display_task(void *arg)
             bool now_valid  = (w != NULL && w->valid);
             /* Trigger re-render when: first draw, mode/theme change, new data
              * values arrived, OR validity flips (e.g. data fetched for the
-             * first time while already showing the blank loading screen). */
+             * first time while already showing the blank loading screen).
+             *
+             * Compare rounded display values (same calculation as render_weather)
+             * so a decimal-only change (e.g. 2.1 → 2.3, both display as 2°)
+             * does not cause an unnecessary SPI repaint of all 6 tubes. */
+            bool fahrenheit = (strncmp(cfg->temp_format, "Fahrenheit", 10) == 0);
+            float cur_tf  = fahrenheit ? w->temp_c    * 9.0f / 5.0f + 32.0f : w->temp_c;
+            float last_tf = fahrenheit ? last_temp_c  * 9.0f / 5.0f + 32.0f : last_temp_c;
+            int cur_t_i   = (int)(cur_tf  < -0.5f ? -cur_tf  + 0.5f : cur_tf  + 0.5f);
+            int last_t_i  = (int)(last_tf < -0.5f ? -last_tf + 0.5f : last_tf + 0.5f);
+            bool cur_neg  = (cur_tf  < -0.5f);
+            bool last_neg = (last_tf < -0.5f);
             bool wx_changed = now_valid && last_wx_valid &&
-                              (w->temp_c != last_temp_c || w->humidity != last_hum);
+                              (cur_t_i != last_t_i || cur_neg != last_neg ||
+                               (int)(w->humidity + 0.5f) != (int)(last_hum + 0.5f));
             bool valid_changed = (now_valid != last_wx_valid);
             if (first || mode_changed || theme_changed || wx_changed || valid_changed) {
                 render_weather(cfg);

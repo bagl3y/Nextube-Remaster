@@ -45,7 +45,7 @@ static void set_defaults(void)
     strcpy(s_cfg.ntp_server, "pool.ntp.org");
     s_cfg.time_zone = -21600;  /* UTC-6 */
 
-    strcpy(s_cfg.weather_source, "wttr");  /* default: no API key needed */
+    strcpy(s_cfg.weather_source, "metno"); /* default: free, no API key needed */
     strcpy(s_cfg.weather_api_key, "");
     strcpy(s_cfg.city, "Airdrie,CA");
     strcpy(s_cfg.temp_format, "Celsius");
@@ -168,6 +168,8 @@ static void parse_json(const char *json)
     json_read_u8(root, "led_brightness", &s_cfg.led_brightness);
 
     json_read_u16(root, "default_countdown_time", &s_cfg.countdown_minutes);
+    json_read_u16(root, "pomodoro_work",          &s_cfg.pomodoro_work);
+    json_read_u16(root, "pomodoro_break",         &s_cfg.pomodoro_break);
     json_read_u16(root, "album_switch_time",      &s_cfg.album_switch_ms);
 
     /* Backlight mode */
@@ -330,6 +332,8 @@ char *config_to_json(void)
     cJSON_AddNumberToObject(root, "lcd_brightness",   s_cfg.lcd_brightness);
     cJSON_AddNumberToObject(root, "led_brightness",   s_cfg.led_brightness);
     cJSON_AddNumberToObject(root, "default_countdown_time", s_cfg.countdown_minutes);
+    cJSON_AddNumberToObject(root, "pomodoro_work",          s_cfg.pomodoro_work);
+    cJSON_AddNumberToObject(root, "pomodoro_break",         s_cfg.pomodoro_break);
     cJSON_AddNumberToObject(root, "album_switch_time",      s_cfg.album_switch_ms);
 
     const char *bl_modes[] = {"Static","Breath","Rainbow","Off"};
