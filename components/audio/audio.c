@@ -316,7 +316,10 @@ static void audio_play_task(void *arg)
             int rd = (int)fread(buf, 1, read_size, f);
             int64_t rd_us = esp_timer_get_time() - t_rd;
             if (rd <= 0) break;
-            if (rd_us > 50000)
+            /* Warn only if SPIFFS read latency exceeds half the DMA ring's
+             * capacity (~256 ms at 32 kHz).  Shorter spikes are absorbed
+             * silently by the ring and don't affect audio continuity. */
+            if (rd_us > 250000)
                 ESP_LOGW(TAG, "fread slow: %lld ms (frame %u)",
                          (long long)(rd_us / 1000), frame);
 
@@ -346,7 +349,12 @@ static void audio_play_task(void *arg)
                                                   &written, pdMS_TO_TICKS(1000));
             int64_t wr_us = esp_timer_get_time() - t_wr;
 
-            if (wr_us > 50000) {
+            /* Normal DMA back-pressure: with an 8×2048-byte ring at dac_rate Hz,
+             * each 4096-byte write blocks ~4096/dac_rate*1000 ms waiting for
+             * 2 descriptors to drain — roughly 128 ms at 32 kHz.  Only warn if
+             * the stall significantly exceeds that, which would indicate the ring
+             * drained (potential gap) or the system is heavily loaded. */
+            if (wr_us > 300000) {
                 write_stalls++;
                 ESP_LOGW(TAG, "DAC write stall: %lld ms (frame %u, written=%u/%d)",
                          (long long)(wr_us / 1000), frame,

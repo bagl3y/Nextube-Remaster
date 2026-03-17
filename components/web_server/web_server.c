@@ -343,14 +343,37 @@ static esp_err_t api_spiffs_ota(httpd_req_t *r)
     return ESP_OK;
 }
 
+/* URL-decode a query-string parameter value in-place.
+ * httpd_query_key_value() returns the raw (percent-encoded) value.
+ * Without decoding, a path like "/" arrives as "%2F" and opendir/fopen
+ * fail with ENOENT because the kernel never sees the real '/' character. */
+static void url_decode_inplace(char *s)
+{
+    char *r = s, *w = s;
+    while (*r) {
+        if (*r == '%' && r[1] && r[2]) {
+            char hex[3] = { r[1], r[2], '\0' };
+            *w++ = (char)strtol(hex, NULL, 16);
+            r += 3;
+        } else if (*r == '+') {
+            *w++ = ' '; r++;
+        } else {
+            *w++ = *r++;
+        }
+    }
+    *w = '\0';
+}
+
 static esp_err_t api_file_ls(httpd_req_t *r)
 {
     char path[128] = "/spiffs";
     char q[128];
     if (httpd_req_get_url_query_str(r, q, sizeof(q)) == ESP_OK) {
         char d[64];
-        if (httpd_query_key_value(q, "dir", d, sizeof(d)) == ESP_OK && d[0] != '\0')
+        if (httpd_query_key_value(q, "dir", d, sizeof(d)) == ESP_OK && d[0] != '\0') {
+            url_decode_inplace(d);
             snprintf(path, sizeof(path), "/spiffs%s", d);
+        }
     }
     /* Strip trailing slash — ESP-IDF SPIFFS opendir() is sensitive to it.
      * Never strip below "/spiffs" (len=7). */
@@ -397,6 +420,7 @@ static esp_err_t api_file_download(httpd_req_t *r)
     if (httpd_req_get_url_query_str(r, q, sizeof(q)) != ESP_OK ||
         httpd_query_key_value(q, "path", p, sizeof(p)) != ESP_OK || p[0] == '\0')
         return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Missing path"), ESP_FAIL;
+    url_decode_inplace(p);
     if (strstr(p, ".."))
         return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Invalid path"), ESP_FAIL;
 
@@ -437,6 +461,7 @@ static esp_err_t api_file_upload(httpd_req_t *r)
     if (httpd_req_get_url_query_str(r, q, sizeof(q)) != ESP_OK ||
         httpd_query_key_value(q, "path", p, sizeof(p)) != ESP_OK || p[0] == '\0')
         return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Missing path"), ESP_FAIL;
+    url_decode_inplace(p);
     if (strstr(p, ".."))
         return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Invalid path"), ESP_FAIL;
 
@@ -473,6 +498,7 @@ static esp_err_t api_file_delete(httpd_req_t *r)
     if (httpd_req_get_url_query_str(r, q, sizeof(q)) != ESP_OK ||
         httpd_query_key_value(q, "path", p, sizeof(p)) != ESP_OK || p[0] == '\0')
         return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Missing path"), ESP_FAIL;
+    url_decode_inplace(p);
     if (strstr(p, ".."))
         return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Invalid path"), ESP_FAIL;
     if (strcmp(p, "/config.json") == 0)
