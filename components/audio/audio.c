@@ -134,7 +134,13 @@ static esp_err_t dac_cont_start(uint32_t sample_rate)
 /*
  * Transition from continuous mode back to idle (oneshot), leaving DAC
  * at mid-rail (128) to prevent audible clicks or pops.
- */
+ *
+ * dac_continuous_del_channels() disables digi-bypass; the DAC immediately
+ * reverts from the last DMA output value to the RTC register value, which
+ * was last written to 0 by the start-of-playback ramp-down.  To make this
+ * a 0→0 (silent) switch rather than a 128→0 (pop) switch, task_cleanup
+ * must end the DMA ring at 0 before calling here.  This function then
+ * ramps 0→128 in oneshot to restore mid-rail idle. */
 static void dac_cont_stop(void)
 {
     if (s_dac_cont) {
@@ -143,11 +149,18 @@ static void dac_cont_stop(void)
         s_dac_cont = NULL;
     }
 
-    /* Restore oneshot and set DAC to silence */
+    /* Restore oneshot and ramp 0 → 128.
+     * After del_channels the DAC holds the RTC register value (0).
+     * A hard jump to 128 would cause a pop; ramp instead. */
     if (!s_dac_one) {
         dac_oneshot_config_t one_cfg = { .chan_id = DAC_CHAN_0 };
-        if (dac_oneshot_new_channel(&one_cfg, &s_dac_one) == ESP_OK)
-            dac_oneshot_output_voltage(s_dac_one, 128);
+        if (dac_oneshot_new_channel(&one_cfg, &s_dac_one) == ESP_OK) {
+            for (int v = 0; v <= 128; v += 16) {
+                dac_oneshot_output_voltage(s_dac_one, (uint8_t)v);
+                vTaskDelay(pdMS_TO_TICKS(1));
+            }
+            dac_oneshot_output_voltage(s_dac_one, 128);   /* settle at silence */
+        }
     }
 }
 
@@ -313,8 +326,10 @@ static void audio_play_task(void *arg)
     }
 
     /* ── Stream PCM data directly from SPIFFS ── */
+    /* Declared at this scope so task_cleanup can read total_bytes_out to
+     * calculate the exact DMA ring drain time without over-waiting. */
+    uint32_t frame = 0, write_stalls = 0, total_bytes_out = 0;
     {
-        uint32_t frame = 0, write_stalls = 0, total_bytes_out = 0;
         int64_t  t_start = esp_timer_get_time();
 
         /* When upsampling, read fewer raw bytes so the expanded output still
@@ -388,20 +403,52 @@ static void audio_play_task(void *arg)
     }
 
 task_cleanup:
-    /* Fade out: write one buffer of silence, then WAIT for it to drain from
-     * the DMA ring before stopping.  Without the wait, dac_continuous_disable()
-     * fires while the silence is still queued — the DMA stops mid-audio and the
-     * DAC snaps from whatever the last sample was directly to the oneshot idle
-     * level (128), which the amplifier hears as a pop on the NEXT playback. */
     if (buf && s_dac_cont) {
-        memset(buf, 128, STREAM_BUF_BYTES);
+        /* ── End-of-playback pop suppression ──────────────────────────────
+         *
+         * Hardware root cause:
+         *   dac_continuous_del_channels() calls dac_ll_digi_bypass_enable(false),
+         *   which instantly switches the DAC from the last DMA output value to
+         *   the RTC register.  That register was last written to 0 by the
+         *   start-of-playback ramp-down and has stayed at 0 throughout.
+         *   If the DMA was outputting 128 (mid-rail silence), the switch is
+         *   128 → 0 — a half-rail step that the amplifier hears as a loud pop.
+         *
+         * Fix: append a 256-sample 128→0 fade-down ramp to the DMA ring so the
+         *   ring's last output is 0.  When del_channels fires, the switch is
+         *   0 → 0 (RTC register also 0) — completely silent.  dac_cont_stop()
+         *   then ramps 0→128 in oneshot to restore mid-rail idle.
+         *
+         * Drain timing:
+         *   During steady-state playback the ring is nearly full.
+         *   ring_bytes = DAC_DESC_NUM × DAC_DMA_BUF_SIZE (e.g. 16384 B at 32 kHz
+         *   = 512 ms).  The old wait of STREAM_BUF_BYTES/dac_rate (178 ms) expired
+         *   while hundreds of ms of audio were still in the ring → pop mid-audio.
+         *   Correct wait = min(total_bytes_out, ring_bytes) / dac_rate + margin.
+         *   For short sounds total_bytes_out < ring_bytes and the wait is shorter;
+         *   for long sounds the ring is full and the wait includes the last 512 ms
+         *   of the audio file playing out — no user-visible added delay. */
+
+        const size_t   RAMP_BYTES = 256;                     /* 8 ms at 32 kHz */
+        const uint32_t ring_bytes = (uint32_t)DAC_DESC_NUM * DAC_DMA_BUF_SIZE;
+
+        /* Build the 128 → 0 ramp (linear, last sample exactly 0). */
+        for (size_t i = 0; i < RAMP_BYTES; i++)
+            buf[i] = (uint8_t)(128 * (RAMP_BYTES - 1 - i) / (RAMP_BYTES - 1));
+
         size_t _fw;
-        dac_continuous_write(s_dac_cont, buf, STREAM_BUF_BYTES, &_fw, pdMS_TO_TICKS(500));
-        /* Block until the ring has drained: STREAM_BUF_BYTES / dac_rate + margin. */
-        vTaskDelay(pdMS_TO_TICKS(STREAM_BUF_BYTES * 1000 / dac_rate + 50));
+        dac_continuous_write(s_dac_cont, buf, RAMP_BYTES, &_fw, pdMS_TO_TICKS(500));
+
+        /* Wait for the ring to fully drain.  ring_occ = bytes currently
+         * queued = min(total_bytes_out, ring_bytes).  The ramp write blocked
+         * until RAMP_BYTES bytes of space were available and then filled them
+         * back, so occupancy is unchanged after the write. */
+        uint32_t ring_occ = (total_bytes_out < ring_bytes) ? total_bytes_out : ring_bytes;
+        vTaskDelay(pdMS_TO_TICKS(ring_occ * 1000 / dac_rate + 150));
+        /* DAC is now at 0; dac_cont_stop() switches 0→0 and ramps 0→128. */
     }
     free(buf);
-    dac_cont_stop();   /* disable continuous, restore oneshot silence */
+    dac_cont_stop();
 
 task_close:
     fclose(f);
