@@ -304,7 +304,6 @@ static void display_show_image_blended(int tube,
     display_show_digit(tube, base, LCD_WIDTH, LCD_HEIGHT);
     free(base);
 }
-
 /* ════════════════════════════════════════════════════════════════════
  *  FlipClock split-flap animation
  *
@@ -845,7 +844,7 @@ static void render_weather(const nextube_config_t *cfg)
         display_path_number(path, sizeof(path), cfg->theme, temp % 10);
         display_show_image(1, path);
         /* Tube 2: degree symbol composited onto blank background */
-        display_show_image(2, unit_blank_path, unit_degree_path);
+        display_show_image_blended(2, unit_blank_path, unit_degree_path);
         /* Tube 3: humidity tens — blank if zero */
         if (hum / 10 == 0) {
             display_show_ampm(3, "blank", cfg->theme);
@@ -862,7 +861,7 @@ static void render_weather(const nextube_config_t *cfg)
         display_show_image(0, path);
         display_path_number(path, sizeof(path), cfg->theme, temp);
         display_show_image(1, path);
-        display_show_image(2, unit_blank_path, unit_degree_path);
+        display_show_image_blended(2, unit_blank_path, unit_degree_path);
         display_show_ampm(3, "blank", cfg->theme);
         display_show_ampm(4, "blank", cfg->theme);
     } else {
@@ -873,7 +872,7 @@ static void render_weather(const nextube_config_t *cfg)
         display_show_image(1, path);
         display_path_number(path, sizeof(path), cfg->theme, temp % 10);
         display_show_image(2, path);
-        display_show_image(3, unit_blank_path, unit_degree_path);
+        display_show_image_blended(3, unit_blank_path, unit_degree_path);
         display_show_ampm(4, "blank", cfg->theme);
     }
 
