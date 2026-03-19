@@ -131,7 +131,7 @@ Every push to `main` triggers a GitHub Actions build. Tagged releases (`v*`) aut
 4. Set baud rate to **460800**
 5. Flash `nextube-fw-full.bin` at offset `0x0`
 
-> **Note:** Web Serial requires Chrome or Edge. Firefox is not supported.
+> **Note:** Web Serial requires Chrome or Edge. Firefox is not supported. Use USB-A to USB-C, C-C cables don't seeem to work.
 
 ### Option B — First-time / Full Flash (esptool CLI)
 
