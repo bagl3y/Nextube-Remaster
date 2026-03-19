@@ -276,14 +276,28 @@ static void display_show_image_blended(int tube,
 
     int ow = 0, oh = 0;
     uint8_t *overlay = jpeg_decode_psram(overlay_path, &ow, &oh);
-    if (overlay && ow == LCD_WIDTH && oh == LCD_HEIGHT) {
-        /* OR-blend: overlay non-black pixels overwrite base */
-        int n = LCD_WIDTH * LCD_HEIGHT * 2;
-        for (int i = 0; i < n; i++)
-            base[i] |= overlay[i];
-        free(overlay);
-    } else {
-        /* Overlay unavailable — show base alone */
+    if (overlay) {
+        /* Center overlay in case it's smaller than LCD_WIDTH x LCD_HEIGHT */
+        int start_x = (LCD_WIDTH - ow) / 2;
+        int start_y = (LCD_HEIGHT - oh) / 2;
+        if (start_x < 0) start_x = 0;
+        if (start_y < 0) start_y = 0;
+
+        for (int y = 0; y < oh; y++) {
+            int dest_y = start_y + y;
+            if (dest_y >= LCD_HEIGHT) continue;
+            for (int x = 0; x < ow; x++) {
+                int dest_x = start_x + x;
+                if (dest_x >= LCD_WIDTH) continue;
+
+                int src_idx = (y * ow + x) * 2;
+                int dst_idx = (dest_y * LCD_WIDTH + dest_x) * 2;
+
+                /* OR-blend: overlay non-black pixels overwrite base */
+                base[dst_idx]     |= overlay[src_idx];
+                base[dst_idx + 1] |= overlay[src_idx + 1];
+            }
+        }
         free(overlay);
     }
 
