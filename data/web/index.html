@@ -105,7 +105,10 @@ select option{background:var(--accent);color:var(--text)}
   <div class="card">
     <h2>Display Settings</h2>
     <div class="field"><label>Theme</label>
-      <select id="f-theme"><option value="">Loading…</option></select>
+      <div style="display:flex;gap:8px;align-items:center">
+        <select id="f-theme" style="flex:1"></select>
+        <button class="btn btn-outline" style="padding:.35rem .8rem;white-space:nowrap" onclick="loadThemes(true)">↺ Refresh</button>
+      </div>
     </div>
     <div class="field"><label>Time Format</label>
       <select id="f-timetype"><option value="24H">24 Hour</option><option value="12H">12 Hour</option></select>
@@ -399,22 +402,39 @@ async function api(path, opts) {
 }
 
 /* ── Theme list (dynamic from /api/themes) ─────────── */
-async function loadThemes() {
+const DEFAULT_THEMES = [
+  'DarkSlate','DotMatrixRG','DotMatrixY','FlipClock','Formula1',
+  'GlitchGR','LightFuture','NixieOY','NotionRain','RedDigits',
+  'RetroPaper','WireMesh'
+];
+
+function populateThemes(themes) {
+  const sel = $('f-theme');
+  const prev = sel.value;
+  sel.innerHTML = '';
+  themes.forEach(t => {
+    const o = document.createElement('option');
+    o.value = t; o.textContent = t;
+    sel.appendChild(o);
+  });
+  if (prev && [...sel.options].some(o => o.value === prev)) sel.value = prev;
+}
+
+async function loadThemes(manual) {
+  /* Always populate with the default list first so the dropdown is never empty */
+  if (!$('f-theme').options.length) populateThemes(DEFAULT_THEMES);
   try {
     const data = await api('themes');
     const themes = data?.themes;
-    if (!themes || !themes.length) return;
-    const sel = $('f-theme');
-    const prev = sel.value;
-    sel.innerHTML = '';
-    themes.forEach(t => {
-      const o = document.createElement('option');
-      o.value = t; o.textContent = t;
-      sel.appendChild(o);
-    });
-    /* Restore previously-selected value if it still exists */
-    if (prev && [...sel.options].some(o => o.value === prev)) sel.value = prev;
-  } catch(_) { /* keep placeholder if API unavailable */ }
+    if (themes && themes.length) {
+      populateThemes(themes);
+      if (manual) toast('Themes refreshed (' + themes.length + ' found)');
+    } else if (manual) {
+      toast('No themes found on device — showing defaults');
+    }
+  } catch(_) {
+    if (manual) toast('Could not reach /api/themes — showing defaults', true);
+  }
 }
 
 /* ── Load settings ─────────────────────────────────── */
