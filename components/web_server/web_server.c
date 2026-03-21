@@ -141,8 +141,13 @@ static esp_err_t api_get_settings(httpd_req_t *r)
 #include "esp_timer.h"
 static void reconnect_timer_cb(void *arg)
 {
+    /* Do NOT stop the server here.  If the STA fails to connect (wrong
+     * password, AP out of range) the IP event never fires and the server
+     * would be unreachable on BOTH STA and AP until reboot.
+     * Instead we keep the server running on the AP (192.168.4.1) so the
+     * user can always reach the UI to fix credentials, and we
+     * stop+restart it only once a new STA IP is actually obtained. */
     s_server_restart_pending = true;
-    web_server_stop();              /* release port 80 before interface changes */
     wifi_manager_reconnect_sta();
 }
 static esp_timer_handle_t s_reconnect_timer = NULL;
@@ -782,13 +787,16 @@ static const httpd_uri_t uris[] = {
     R(HTTP_OPTIONS, "/api/*",            api_cors),
 };
 
-/* Restart the HTTP server when STA obtains a new IP after a credential change. */
+/* Refresh the HTTP server when STA obtains a new IP after a credential change.
+ * Stop first so httpd gets fresh sockets bound to the new interface;
+ * web_server_start() would be a no-op if we didn't clear s_server first. */
 static void web_server_got_ip_handler(void *arg, esp_event_base_t base,
                                       int32_t id, void *data)
 {
     if (!s_server_restart_pending) return;
     s_server_restart_pending = false;
-    ESP_LOGI(TAG, "STA got new IP — restarting HTTP server");
+    ESP_LOGI(TAG, "STA got new IP — refreshing HTTP server sockets");
+    web_server_stop();   /* clears s_server so web_server_start() isn't a no-op */
     web_server_start();
 }
 

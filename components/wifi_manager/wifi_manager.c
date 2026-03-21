@@ -20,11 +20,23 @@ static esp_netif_t *s_ap_netif  = NULL;
 
 /* AP is disabled 60 seconds after STA gets an IP.  60 s gives the browser
  * enough time to finish loading the web UI before the AP disappears.
- * If STA later disconnects the AP is re-enabled immediately so the device
- * remains accessible at 192.168.4.1 for re-configuration. */
-#define AP_DISABLE_DELAY_US  (60LL * 1000 * 1000)   /* 60 seconds */
+ * If STA later disconnects the AP is re-enabled so the device remains
+ * accessible at 192.168.4.1 for re-configuration. */
+#define AP_DISABLE_DELAY_US   (60LL  * 1000 * 1000)   /* 60 seconds  */
 
-static esp_timer_handle_t s_ap_disable_timer = NULL;
+/* If credentials are saved but the STA never connects, close the setup AP
+ * after this window.  Prevents "Nextube-Setup" broadcasting forever when
+ * the device is deployed away from the configured network. */
+#define AP_BOOT_TIMEOUT_US    (3LL * 60 * 1000 * 1000) /* 3 minutes   */
+
+static esp_timer_handle_t s_ap_disable_timer   = NULL;
+static esp_timer_handle_t s_ap_boot_timer      = NULL;
+
+/* Set once the boot-window timer fires without a successful STA connection.
+ * While true, WIFI_EVENT_STA_DISCONNECTED will NOT re-enable the AP —
+ * the device keeps retrying STA silently.  Reset whenever new credentials
+ * are saved so the AP comes back up for the new connection attempt. */
+static bool s_ap_boot_expired = false;
 
 static void ap_disable_cb(void *arg)
 {
@@ -32,13 +44,20 @@ static void ap_disable_cb(void *arg)
     esp_wifi_set_mode(WIFI_MODE_STA);
 }
 
-static void init_ap_timer(void)
+static void ap_boot_timeout_cb(void *arg)
 {
-    esp_timer_create_args_t args = {
-        .callback = ap_disable_cb,
-        .name     = "ap_disable",
-    };
-    esp_timer_create(&args, &s_ap_disable_timer);
+    if (xEventGroupGetBits(s_wifi_events) & WIFI_CONNECTED_BIT) return; /* connected in time */
+    ESP_LOGI(TAG, "Boot AP timeout: STA not connected – closing setup AP");
+    s_ap_boot_expired = true;
+    esp_wifi_set_mode(WIFI_MODE_STA);
+}
+
+static void init_ap_timers(void)
+{
+    esp_timer_create_args_t a = { .callback = ap_disable_cb,     .name = "ap_disable" };
+    esp_timer_create(&a, &s_ap_disable_timer);
+    esp_timer_create_args_t b = { .callback = ap_boot_timeout_cb, .name = "ap_boot"    };
+    esp_timer_create(&b, &s_ap_boot_timer);
 }
 
 static void wifi_event_handler(void *arg, esp_event_base_t base,
@@ -52,10 +71,13 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
         case WIFI_EVENT_STA_DISCONNECTED:
             ESP_LOGW(TAG, "STA disconnected, retrying...");
             xEventGroupClearBits(s_wifi_events, WIFI_CONNECTED_BIT);
-            /* Cancel any pending AP-disable and restore AP so the user can
-             * reach 192.168.4.1 to fix credentials if needed. */
             if (s_ap_disable_timer) esp_timer_stop(s_ap_disable_timer);
-            esp_wifi_set_mode(WIFI_MODE_APSTA);
+            /* Re-enable the setup AP only if the boot window is still open.
+             * Once s_ap_boot_expired is true the device keeps retrying STA
+             * silently without broadcasting the setup AP. */
+            if (!s_ap_boot_expired) {
+                esp_wifi_set_mode(WIFI_MODE_APSTA);
+            }
             esp_wifi_connect();
             break;
         case WIFI_EVENT_AP_STACONNECTED: {
@@ -70,8 +92,9 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
         snprintf(s_ip_str, sizeof(s_ip_str), IPSTR, IP2STR(&ev->ip_info.ip));
         ESP_LOGI(TAG, "STA got IP: %s – AP will stop in 60 s", s_ip_str);
         xEventGroupSetBits(s_wifi_events, WIFI_CONNECTED_BIT);
-        /* Schedule AP shutdown 60 s from now to let any open web UI sessions
-         * finish loading before the AP interface disappears. */
+        /* Connected — cancel the boot-window timeout (no longer needed). */
+        if (s_ap_boot_timer) esp_timer_stop(s_ap_boot_timer);
+        /* Schedule graceful AP shutdown 60 s from now. */
         if (s_ap_disable_timer) {
             esp_timer_stop(s_ap_disable_timer);
             esp_timer_start_once(s_ap_disable_timer, AP_DISABLE_DELAY_US);
@@ -99,7 +122,7 @@ void wifi_manager_start(void)
     wifi_init_config_t init_cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&init_cfg));
 
-    init_ap_timer();
+    init_ap_timers();
 
     esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL);
     esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, NULL);
@@ -126,6 +149,11 @@ void wifi_manager_start(void)
         strncpy((char *)sta_cfg.sta.password, cfg->password, sizeof(sta_cfg.sta.password) - 1);
         ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_cfg));
         ESP_LOGI(TAG, "STA: connecting to \"%s\"", cfg->ssid);
+        /* Start the boot-window timer.  If STA does not obtain an IP within
+         * AP_BOOT_TIMEOUT_US the setup AP is closed to avoid broadcasting
+         * "Nextube-Setup" indefinitely on a deployed device. */
+        esp_timer_start_once(s_ap_boot_timer, AP_BOOT_TIMEOUT_US);
+        ESP_LOGI(TAG, "AP boot window: %.0f min", AP_BOOT_TIMEOUT_US / 60e6);
     }
 
     ESP_ERROR_CHECK(esp_wifi_start());
@@ -138,7 +166,14 @@ void wifi_manager_reconnect_sta(void)
     const nextube_config_t *cfg = config_get();
     if (strlen(cfg->ssid) == 0) return;
 
-    /* Ensure AP is back up while we attempt to reconnect */
+    /* New credentials were saved — reset the boot-timeout state so the AP
+     * stays visible while the user waits for the new credentials to work.
+     * Re-arm the boot timer for another full window from now. */
+    s_ap_boot_expired = false;
+    if (s_ap_boot_timer) {
+        esp_timer_stop(s_ap_boot_timer);
+        esp_timer_start_once(s_ap_boot_timer, AP_BOOT_TIMEOUT_US);
+    }
     esp_wifi_set_mode(WIFI_MODE_APSTA);
 
     wifi_config_t sta_cfg = {0};
