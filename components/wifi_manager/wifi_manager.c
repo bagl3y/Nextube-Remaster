@@ -145,9 +145,13 @@ void wifi_manager_reconnect_sta(void)
     strncpy((char *)sta_cfg.sta.ssid,     cfg->ssid,     sizeof(sta_cfg.sta.ssid)     - 1);
     strncpy((char *)sta_cfg.sta.password, cfg->password, sizeof(sta_cfg.sta.password) - 1);
 
-    esp_wifi_disconnect();
+    /* Apply new credentials BEFORE disconnecting.  The WIFI_EVENT_STA_DISCONNECTED
+     * handler calls esp_wifi_connect() automatically, so by the time it fires the
+     * new SSID/password are already in place.  Calling esp_wifi_connect() here a
+     * second time would create two conflicting association attempts and leave the
+     * TCP/IP stack in an indeterminate state. */
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_cfg));
-    ESP_ERROR_CHECK(esp_wifi_connect());
+    esp_wifi_disconnect();   /* event handler will call esp_wifi_connect() */
     ESP_LOGI(TAG, "STA: reconnecting to \"%s\"", cfg->ssid);
 }
 

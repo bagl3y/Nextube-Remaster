@@ -15,6 +15,8 @@
 #include "esp_spiffs.h"
 #include "esp_system.h"
 #include "esp_wifi.h"
+#include "esp_event.h"
+#include "lwip/ip_addr.h"
 #include "cJSON.h"
 
 #include "freertos/semphr.h"
@@ -27,6 +29,7 @@
 
 static const char *TAG = "web_srv";
 static httpd_handle_t s_server = NULL;
+static bool s_server_restart_pending = false;   /* set when a WiFi reconnect stops the server */
 
 /* Forward declaration — defined in the static-file section below */
 static const char *content_type(const char *p);
@@ -129,10 +132,17 @@ static esp_err_t api_get_settings(httpd_req_t *r)
 /* One-shot esp_timer: reconnect WiFi after the HTTP response has been sent.
  * Calling esp_wifi_disconnect() inside the HTTP handler kills the live TCP
  * connection before the response reaches the browser and can also disrupt
- * SPI DMA in-flight, blanking the displays. */
+ * SPI DMA in-flight, blanking the displays.
+ *
+ * The HTTP server is stopped before reconnecting and restarted once the new
+ * IP address is obtained.  Without stop/restart the httpd listening socket
+ * becomes stale on the new interface and the device is unreachable until
+ * the next reboot. */
 #include "esp_timer.h"
 static void reconnect_timer_cb(void *arg)
 {
+    s_server_restart_pending = true;
+    web_server_stop();              /* release port 80 before interface changes */
     wifi_manager_reconnect_sta();
 }
 static esp_timer_handle_t s_reconnect_timer = NULL;
@@ -754,13 +764,31 @@ static const httpd_uri_t uris[] = {
     R(HTTP_OPTIONS, "/api/*",            api_cors),
 };
 
+/* Restart the HTTP server when STA obtains a new IP after a credential change. */
+static void web_server_got_ip_handler(void *arg, esp_event_base_t base,
+                                      int32_t id, void *data)
+{
+    if (!s_server_restart_pending) return;
+    s_server_restart_pending = false;
+    ESP_LOGI(TAG, "STA got new IP — restarting HTTP server");
+    web_server_start();
+}
+
 void web_server_start(void)
 {
-    /* Install the log capture hook as early as possible so boot messages
-     * after this point are captured.  All pre-hook messages still appear
-     * on UART; only post-hook messages are buffered for the web viewer. */
-    s_log_mutex = xSemaphoreCreateMutex();
-    esp_log_set_vprintf(log_vprintf_hook);
+    /* One-time setup: log hook and IP-reconnect handler.
+     * Guard with s_log_mutex so these are only installed on the first call;
+     * subsequent calls (after a WiFi reconnect) skip straight to httpd_start. */
+    if (!s_log_mutex) {
+        s_log_mutex = xSemaphoreCreateMutex();
+        esp_log_set_vprintf(log_vprintf_hook);
+        /* Restart the HTTP server whenever STA obtains a (new) IP address,
+         * so the listening socket is always fresh after a credential change. */
+        esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                                   web_server_got_ip_handler, NULL);
+    }
+
+    if (s_server) return;   /* already running */
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.max_uri_handlers = 26;
