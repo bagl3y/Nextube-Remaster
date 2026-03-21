@@ -246,9 +246,11 @@ Weather mode auto-cycles between two panels every 5 seconds:
 
 **Panel 1 — temperature + icon:**
 ```
-Positive:        [tens/blank] [units] [°C/°F] [blank] [blank] [icon]
-Negative single: [-]          [units] [°C/°F] [blank] [blank] [icon]
-Negative double: [-]          [tens]  [units] [°C/°F] [blank] [icon]
+All layouts: [blank] [−/blank] [tens/blank] [units] [°C/°F] [icon]
+e.g.  2°C :  _        _           _            2      °C     ☁
+e.g. 15°C :  _        _           1            5      °C     ☁
+e.g.  −7°C:  _        −           _            7      °C     ☁
+e.g. −23°C:  _        −           2            3      °C     ☁
 ```
 
 **Panel 2 — humidity + icon:**

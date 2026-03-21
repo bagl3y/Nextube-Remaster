@@ -769,12 +769,15 @@ static void render_album(const nextube_config_t *cfg,
  */
 /* render_weather – panel 0 = temperature + icon, panel 1 = humidity + icon.
  *
- * Two-panel layout (auto-cycles every WEATHER_PANEL_MS ms in the display task):
+ * Two-panel layout (auto-cycles in the display task):
  *
- *  Panel 0 — temperature:
- *    Positive:        [tens/blank] [units] [°C/°F] [blank] [blank] [icon]
- *    Negative single: [-]          [units] [°C/°F] [blank] [blank] [icon]
- *    Negative double: [-]          [tens]  [units] [°C/°F] [blank] [icon]
+ *  Panel 0 — temperature (tubes 0-indexed):
+ *    All layouts:     tube 0 = blank
+ *                     tube 1 = minus (negative) or blank (positive)
+ *                     tube 2 = temp tens (blank if single digit)
+ *                     tube 3 = temp units
+ *                     tube 4 = °C/°F
+ *                     tube 5 = weather icon
  *
  *  Panel 1 — humidity:
  *    [blank] [blank] [blank] [hum_tens/blank] [hum_units] [icon]
@@ -826,50 +829,38 @@ static void render_weather(const nextube_config_t *cfg, int panel)
     }
 
     /* ── Panel 0: temperature ──────────────────────────────────────── */
+    /* Layout (all cases):
+     *   0=blank  1=minus/blank  2=tens/blank  3=units  4=°C/°F  5=icon */
 
-    /* Prime flip animation cache for the degree tube */
-    flip_prime_blank(negative && temp >= 10 ? 3 : 2, cfg->theme);
+    /* Prime flip animation cache — degree symbol is always on tube 4 */
+    flip_prime_blank(4, cfg->theme);
 
-    /* Degree-symbol tube: show degreec/degreef directly */
-    display_path_temperature(path, sizeof(path), cfg->theme, unit);
+    /* Tube 0: always blank */
+    display_show_ampm(0, "blank", cfg->theme);
 
-    if (!negative) {
-        if (temp / 10 == 0) {
-            display_show_ampm(0, "blank", cfg->theme);
-        } else {
-            display_path_number(path, sizeof(path), cfg->theme, temp / 10);
-            display_show_image(0, path);
-            /* Restore path to degree image after overwriting above */
-            display_path_temperature(path, sizeof(path), cfg->theme, unit);
-        }
-        display_path_number(path, sizeof(path), cfg->theme, temp % 10);
-        display_show_image(1, path);
-        display_path_temperature(path, sizeof(path), cfg->theme, unit);
-        display_show_image(2, path);
-        display_show_ampm(3, "blank", cfg->theme);
-        display_show_ampm(4, "blank", cfg->theme);
-    } else if (temp <= 9) {
-        /* Single-digit negative: [-][digit][°C/°F][blank][blank][icon] */
+    /* Tube 1: minus sign for negative, blank for positive */
+    if (negative) {
         display_path_temperature(path, sizeof(path), cfg->theme, "minus");
-        display_show_image(0, path);
-        display_path_number(path, sizeof(path), cfg->theme, temp);
         display_show_image(1, path);
-        display_path_temperature(path, sizeof(path), cfg->theme, unit);
-        display_show_image(2, path);
-        display_show_ampm(3, "blank", cfg->theme);
-        display_show_ampm(4, "blank", cfg->theme);
     } else {
-        /* Double-digit negative: [-][tens][units][°C/°F][blank][icon] */
-        display_path_temperature(path, sizeof(path), cfg->theme, "minus");
-        display_show_image(0, path);
-        display_path_number(path, sizeof(path), cfg->theme, temp / 10);
-        display_show_image(1, path);
-        display_path_number(path, sizeof(path), cfg->theme, temp % 10);
-        display_show_image(2, path);
-        display_path_temperature(path, sizeof(path), cfg->theme, unit);
-        display_show_image(3, path);
-        display_show_ampm(4, "blank", cfg->theme);
+        display_show_ampm(1, "blank", cfg->theme);
     }
+
+    /* Tube 2: tens digit (blank if < 10) */
+    if (temp / 10 == 0) {
+        display_show_ampm(2, "blank", cfg->theme);
+    } else {
+        display_path_number(path, sizeof(path), cfg->theme, temp / 10);
+        display_show_image(2, path);
+    }
+
+    /* Tube 3: units digit */
+    display_path_number(path, sizeof(path), cfg->theme, temp % 10);
+    display_show_image(3, path);
+
+    /* Tube 4: °C / °F */
+    display_path_temperature(path, sizeof(path), cfg->theme, unit);
+    display_show_image(4, path);
 }
 
 /* ── Timer state ────────────────────────────────────────────────────── */

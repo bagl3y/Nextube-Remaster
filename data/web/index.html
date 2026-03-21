@@ -430,7 +430,7 @@ async function loadThemes(manual) {
       populateThemes(themes);
       if (manual) toast('Themes refreshed (' + themes.length + ' found)');
     } else if (manual) {
-      toast('No themes found on device — showing defaults');
+      toast('No new themes found on device — showing defaults');
     }
   } catch(_) {
     if (manual) toast('Could not reach /api/themes — showing defaults', true);
