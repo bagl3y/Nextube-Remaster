@@ -291,7 +291,11 @@ static void save_to_flash(void)
 /* ── Public API ────────────────────────────────────────────────────── */
 void config_mgr_init(void)
 {
-    s_mutex = xSemaphoreCreateMutex();
+    /* Recursive mutex: config_to_json() may be called from within an
+     * already-locked context (config_set_json → save_to_flash → config_to_json),
+     * so a plain mutex would deadlock.  A recursive mutex allows the same
+     * task to re-acquire it without blocking. */
+    s_mutex = xSemaphoreCreateRecursiveMutex();
     set_defaults();
     load_from_flash();
 }
@@ -304,19 +308,19 @@ const nextube_config_t *config_get(void)
 bool config_set_json(const char *json, size_t len)
 {
     if (!json || len == 0) return false;
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    xSemaphoreTakeRecursive(s_mutex, portMAX_DELAY);
     parse_json(json);
     save_to_flash();
-    xSemaphoreGive(s_mutex);
+    xSemaphoreGiveRecursive(s_mutex);
     return true;
 }
 
 char *config_to_json(void)
 {
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    xSemaphoreTakeRecursive(s_mutex, portMAX_DELAY);
 
     cJSON *root = cJSON_CreateObject();
-    if (!root) { xSemaphoreGive(s_mutex); return NULL; }
+    if (!root) { xSemaphoreGiveRecursive(s_mutex); return NULL; }
 
     /* apps array (for backward compat with original firmware format) */
     cJSON *apps = cJSON_AddArrayToObject(root, "apps");
@@ -379,7 +383,7 @@ char *config_to_json(void)
 
     char *out = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
-    xSemaphoreGive(s_mutex);
+    xSemaphoreGiveRecursive(s_mutex);
     return out;
 }
 
@@ -389,14 +393,14 @@ char *config_to_json(void)
  * when the user explicitly saves settings via the web UI. */
 void config_set_mode(app_mode_t mode)
 {
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    xSemaphoreTakeRecursive(s_mutex, portMAX_DELAY);
     s_cfg.current_mode = mode;
-    xSemaphoreGive(s_mutex);
+    xSemaphoreGiveRecursive(s_mutex);
 }
 
 void config_advance_mode(void)
 {
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    xSemaphoreTakeRecursive(s_mutex, portMAX_DELAY);
 
     /* Step forward through APP_MODE_MAX slots, skipping disabled ones.
      * Worst case: all modes except the current one are disabled, so we
@@ -415,15 +419,15 @@ void config_advance_mode(void)
         ESP_LOGI(TAG, "Rotation: advanced to mode %d", m);
     }
 
-    xSemaphoreGive(s_mutex);
+    xSemaphoreGiveRecursive(s_mutex);
 }
 
 void config_reset(void)
 {
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    xSemaphoreTakeRecursive(s_mutex, portMAX_DELAY);
     set_defaults();
     save_to_flash();
-    xSemaphoreGive(s_mutex);
+    xSemaphoreGiveRecursive(s_mutex);
     ESP_LOGI(TAG, "Config reset to factory defaults");
 }
 
