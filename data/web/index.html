@@ -183,6 +183,7 @@ select option{background:var(--accent);color:var(--text)}
     <h2>WiFi Configuration</h2>
     <div class="field"><label>SSID</label><input id="f-ssid" type="text"></div>
     <div class="field"><label>Password</label><input id="f-pass" type="password"></div>
+    <div class="field"><label>Hostname</label><input id="f-hostname" type="text" placeholder="nextube-remaster"></div>
     <div class="btn-group">
       <button class="btn btn-primary" onclick="saveSettings()">Save & Connect</button>
       <button class="btn btn-outline" onclick="scanWifi()">Scan Networks</button>
@@ -218,6 +219,24 @@ select option{background:var(--accent);color:var(--text)}
         <select id="f-tempfmt"><option value="Celsius">Celsius</option><option value="Fahrenheit">Fahrenheit</option></select>
       </div>
     </div>
+    <div class="row">
+      <div class="field"><label>Panel Rotation (seconds)</label>
+        <input id="f-wx-panel" type="number" min="1" max="300" value="5">
+      </div>
+    </div>
+    <div class="field"><label>Display Panels</label>
+      <div style="display:flex;gap:1.5rem;margin-top:.35rem">
+        <label style="display:flex;align-items:center;gap:.45rem;cursor:pointer">
+          <input type="checkbox" id="f-wx-p0" onchange="onWxPanelToggle('f-wx-p0')" checked>
+          <span>Temperature (panel 0)</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:.45rem;cursor:pointer">
+          <input type="checkbox" id="f-wx-p1" onchange="onWxPanelToggle('f-wx-p1')" checked>
+          <span>Humidity (panel 1)</span>
+        </label>
+      </div>
+      <small style="color:var(--dim);margin-top:.3rem;display:block">At least one panel must remain enabled.</small>
+    </div>
   </div>
   <div class="card">
     <h2>YouTube / Bilibili</h2>
@@ -243,11 +262,6 @@ select option{background:var(--accent);color:var(--text)}
         <input id="f-pomo-break" type="number" min="1" max="999" value="5">
       </div>
     </div>
-    <div class="row">
-      <div class="field"><label>Weather Panel Rotation (seconds)</label>
-        <input id="f-wx-panel" type="number" min="1" max="300" value="5">
-      </div>
-    </div>
   </div>
   <div class="btn-group"><button class="btn btn-primary" onclick="saveSettings()">Save Services</button></div>
 </div>
@@ -267,6 +281,12 @@ select option{background:var(--accent);color:var(--text)}
       <div style="display:flex;gap:8px;align-items:center">
         <input id="f-bell" type="text" style="flex:1">
         <button class="btn btn-outline" style="white-space:nowrap;padding:.35rem .8rem" onclick="testAudio('f-bell')">▶ Test</button>
+      </div>
+    </div>
+    <div class="field"><label>Tone Sound (Pomodoro/Countdown)</label>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input id="f-tone" type="text" style="flex:1">
+        <button class="btn btn-outline" style="white-space:nowrap;padding:.35rem .8rem" onclick="testAudio('f-tone')">▶ Test</button>
       </div>
     </div>
     <div class="field"><label>Timer Sound</label>
@@ -363,6 +383,7 @@ select option{background:var(--accent);color:var(--text)}
 
 <script>
 const $ = id => document.getElementById(id);
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 let cfg = {};
 
 /* ── Toast ─────────────────────────────────────────── */
@@ -370,6 +391,14 @@ function toast(msg, err) {
   const t = $('toast'); t.textContent = msg;
   t.className = 'toast show' + (err ? ' err' : '');
   setTimeout(() => t.className = 'toast', 3000);
+}
+
+/* ── Weather panel enable guard (either but not both may be off) ── */
+function onWxPanelToggle(changedId) {
+  if (!$('f-wx-p0').checked && !$('f-wx-p1').checked) {
+    /* Prevent both being unchecked — restore the one that was just changed */
+    $(changedId).checked = true;
+  }
 }
 
 /* ── Weather source toggle ─────────────────────────── */
@@ -397,8 +426,11 @@ document.querySelectorAll('#tabs button').forEach(b => {
 
 /* ── API helpers ───────────────────────────────────── */
 async function api(path, opts) {
-  try { const r = await fetch('/api/' + path, opts); return await r.json(); }
-  catch(e) { toast('API error: ' + e.message, true); return null; }
+  try {
+    const r = await fetch('/api/' + path, opts);
+    if (!r.ok) { toast('API error: HTTP ' + r.status, true); return null; }
+    return await r.json();
+  } catch(e) { toast('API error: ' + e.message, true); return null; }
 }
 
 /* ── Theme list (dynamic from /api/themes) ─────────── */
@@ -450,7 +482,9 @@ async function loadSettings() {
   $('f-blmode').value = cfg.backlight_mode || 'Breath'; onBlModeChange();
   $('f-ssid').value = cfg.ssid || '';
   $('f-pass').value = cfg.password || '';
+  $('f-hostname').value = cfg.hostname || 'nextube-remaster';
   $('f-tz').value = cfg.time_zone !== undefined ? cfg.time_zone : -6;
+  $('f-ntp').value = cfg.ntp_server || 'pool.ntp.org';
   $('f-wsrc').value = cfg.weather_source || 'wttr'; toggleWeatherKey();
   $('f-wkey').value = cfg.weather_api_key || '';
   $('f-city').value = cfg.City || '';
@@ -462,6 +496,7 @@ async function loadSettings() {
   $('f-vol').value = cfg.volume || 20; $('v-vol').textContent = cfg.volume || 20;
   $('f-music').value = cfg.music_file || '';
   $('f-bell').value = cfg.bell_file || '';
+  $('f-tone').value  = cfg.tone_file  || '';
   $('f-timer').value = cfg.timer_file || '';
   $('f-click').value = cfg.click_file || '';
   $('f-btn-sound').checked = cfg.button_sound !== false;
@@ -469,6 +504,8 @@ async function loadSettings() {
   $('f-pomo-work').value  = cfg.pomodoro_work  || 25;
   $('f-pomo-break').value = cfg.pomodoro_break || 5;
   $('f-wx-panel').value   = Math.round((cfg.weather_panel_ms || 5000) / 1000);
+  $('f-wx-p0').checked    = cfg.weather_panel0_en !== false;
+  $('f-wx-p1').checked    = cfg.weather_panel1_en !== false;
 
   /* Enabled modes bitmask.  Default 0xFF = all modes on (Clock and Date are independent). */
   const em = cfg.enabled_modes !== undefined ? cfg.enabled_modes : 0xFF;
@@ -556,16 +593,18 @@ async function saveSettings() {
     enabled_modes: enabledModes,
     rotation_enabled: $('rot-enabled').checked,
     rotation_interval_s: +$('rot-interval').value,
-    ssid: $('f-ssid').value, password: $('f-pass').value,
-    time_zone: +$('f-tz').value,
+    ssid: $('f-ssid').value, password: $('f-pass').value, hostname: $('f-hostname').value,
+    time_zone: +$('f-tz').value, ntp_server: $('f-ntp').value,
     weather_source: $('f-wsrc').value, weather_api_key: $('f-wkey').value, City: $('f-city').value, temperature_formate: $('f-tempfmt').value,
     video_site: $('f-vsite').value, youtube_id: $('f-ytid').value, youtube_key: $('f-ytkey').value, bili_uid: $('f-buid').value,
-    volume: +$('f-vol').value, music_file: $('f-music').value, bell_file: $('f-bell').value, timer_file: $('f-timer').value,
+    volume: +$('f-vol').value, music_file: $('f-music').value, bell_file: $('f-bell').value, tone_file: $('f-tone').value, timer_file: $('f-timer').value,
     click_file: $('f-click').value, button_sound: $('f-btn-sound').checked,
     default_countdown_time: +$('f-countdown').value,
     pomodoro_work:  +$('f-pomo-work').value,
     pomodoro_break: +$('f-pomo-break').value,
-    weather_panel_ms: Math.max(1000, +$('f-wx-panel').value * 1000),
+    weather_panel_ms:  Math.max(1000, +$('f-wx-panel').value * 1000),
+    weather_panel0_en: $('f-wx-p0').checked,
+    weather_panel1_en: $('f-wx-p1').checked,
   };
   const res = await api('settings', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
   toast(res?.status === 'ok' ? 'Settings saved!' : 'Save failed', res?.status !== 'ok');
@@ -587,11 +626,12 @@ async function scanWifi() {
   setTimeout(async () => {
     const nets = await api('wifi/scan');
     if (!nets) return;
-    $('wifi-list').innerHTML = nets.map(n =>
-      `<div class="wifi-item" onclick="$('f-ssid').value='${n.ssid}'">
-        <span class="ssid">${n.ssid}</span><span class="rssi">${n.rssi} dBm</span>
-      </div>`
-    ).join('');
+    $('wifi-list').innerHTML = nets.map(n => {
+      const safe = esc(n.ssid);
+      return `<div class="wifi-item" onclick="$('f-ssid').value=decodeURIComponent('${encodeURIComponent(n.ssid)}')">
+        <span class="ssid">${safe}</span><span class="rssi">${n.rssi} dBm</span>
+      </div>`;
+    }).join('');
   }, 3000);
 }
 
@@ -693,8 +733,8 @@ async function browseDir(dir) {
   let built = '';
   parts.forEach(p => {
     built += '/' + p;
-    const seg = built;
-    crumbHtml += ` › <span style="cursor:pointer;color:var(--hi)" onclick="browseDir('${seg}')">${p}</span>`;
+    const encSeg = encodeURIComponent(built);
+    crumbHtml += ` › <span style="cursor:pointer;color:var(--hi)" onclick="browseDir(decodeURIComponent('${encSeg}'))">${esc(p)}</span>`;
   });
   $('file-breadcrumb').innerHTML = crumbHtml;
 
@@ -717,20 +757,21 @@ async function browseDir(dir) {
       const sizeStr = isDir ? 'folder' : (f.size < 1024 ? f.size + ' B' : (f.size/1024).toFixed(1) + ' K');
       const icon = isDir ? '📁' : '📄';
       const fullPath = (dir.replace(/\/$/, '') + '/' + f.name);
+      const safeName = esc(f.name);
+      const encPath = encodeURIComponent(fullPath);
       if (isDir) {
-        rows += `<div class="file-row" onclick="browseDir('${fullPath}')" style="cursor:pointer">
-          <span>${icon} ${f.name}</span>
+        rows += `<div class="file-row" onclick="browseDir(decodeURIComponent('${encPath}'))" style="cursor:pointer">
+          <span>${icon} ${safeName}</span>
           <span style="color:var(--dim);font-size:.8rem">${sizeStr}</span>
         </div>`;
       } else {
-        const enc = encodeURIComponent(fullPath);
         rows += `<div class="file-row">
-          <span>${icon} ${f.name}</span>
+          <span>${icon} ${safeName}</span>
           <span style="display:flex;align-items:center;gap:.5rem">
             <span style="color:var(--dim);font-size:.8rem">${sizeStr}</span>
-            <a href="/api/file/download?path=${enc}" download="${f.name}"
+            <a href="/api/file/download?path=${encPath}" download="${safeName}"
                style="font-size:.75rem;color:var(--ok);text-decoration:none;padding:.15rem .4rem;border:1px solid var(--ok);border-radius:4px">⬇</a>
-            <button onclick="deleteFile('${fullPath}')"
+            <button onclick="deleteFile(decodeURIComponent('${encPath}'))"
                style="font-size:.75rem;color:var(--hi);background:none;border:1px solid var(--hi);border-radius:4px;padding:.15rem .4rem;cursor:pointer">✕</button>
           </span>
         </div>`;

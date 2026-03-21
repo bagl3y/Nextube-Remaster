@@ -8,11 +8,13 @@
 #include "cJSON.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include <string.h>
 #include <stdlib.h>
 
 static const char *TAG = "weather";
 static weather_data_t s_weather = {0};
+static SemaphoreHandle_t s_wx_mutex = NULL;
 
 /* ── HTTP helper ────────────────────────────────────────────────────── */
 /* Returns heap-allocated NUL-terminated body (up to 4 KB), or NULL on error.
@@ -100,16 +102,23 @@ static void fetch_wttr(const nextube_config_t *cfg)
         cJSON *tc       = cJSON_GetObjectItem(cur, "temp_C");
         cJSON *hum      = cJSON_GetObjectItem(cur, "humidity");
         cJSON *desc_arr = cJSON_GetObjectItem(cur, "weatherDesc");
-        if (tc  && tc->valuestring)
-            s_weather.temp_c   = (float)atof(tc->valuestring);
-        if (hum && hum->valuestring)
-            s_weather.humidity = (float)atof(hum->valuestring);
+
+        /* Parse values into locals before taking the mutex */
+        float  parsed_temp = 0.0f;
+        float  parsed_hum  = 0.0f;
+        bool   have_temp = false, have_hum = false;
+        char   parsed_condition[64] = {0};
+        char   parsed_icon[32] = {0};
+        bool   have_desc = false;
+
+        if (tc  && tc->valuestring)  { parsed_temp = (float)atof(tc->valuestring);  have_temp = true; }
+        if (hum && hum->valuestring) { parsed_hum  = (float)atof(hum->valuestring); have_hum  = true; }
         cJSON *desc0 = cJSON_GetArrayItem(desc_arr, 0);
         if (desc0) {
             cJSON *val = cJSON_GetObjectItem(desc0, "value");
             if (val && val->valuestring) {
-                strncpy(s_weather.condition, val->valuestring,
-                        sizeof(s_weather.condition) - 1);
+                strncpy(parsed_condition, val->valuestring,
+                        sizeof(parsed_condition) - 1);
                 /* Map wttr.in condition string to SPIFFS icon filename. */
                 const char *d = val->valuestring;
                 const char *icon;
@@ -126,12 +135,23 @@ static void fetch_wttr(const nextube_config_t *cfg)
                 else if (strstr(d, "Partly")    || strstr(d, "Few"))       icon = "fewClouds";
                 else if (strstr(d, "Cloud")     || strstr(d, "cloud"))     icon = "overcastClouds";
                 else                                                        icon = "sun";
-                strncpy(s_weather.icon, icon, sizeof(s_weather.icon) - 1);
+                strncpy(parsed_icon, icon, sizeof(parsed_icon) - 1);
+                have_desc = true;
             }
         }
+
+        xSemaphoreTake(s_wx_mutex, portMAX_DELAY);
+        if (have_temp) s_weather.temp_c   = parsed_temp;
+        if (have_hum)  s_weather.humidity = parsed_hum;
+        if (have_desc) {
+            strncpy(s_weather.condition, parsed_condition, sizeof(s_weather.condition) - 1);
+            strncpy(s_weather.icon, parsed_icon, sizeof(s_weather.icon) - 1);
+        }
         s_weather.valid = true;
+        xSemaphoreGive(s_wx_mutex);
+
         ESP_LOGI(TAG, "wttr.in: %.0f°C  %d%%  %s",
-                 s_weather.temp_c, (int)s_weather.humidity, s_weather.condition);
+                 parsed_temp, (int)parsed_hum, parsed_condition);
     }
     cJSON_Delete(root);
 }
@@ -146,7 +166,7 @@ static void fetch_openweather(const nextube_config_t *cfg)
 
     char url[256];
     snprintf(url, sizeof(url),
-             "http://api.openweathermap.org/data/2.5/weather"
+             "https://api.openweathermap.org/data/2.5/weather"
              "?q=%s&appid=%s&units=metric",
              cfg->city, cfg->weather_api_key);
 
@@ -157,20 +177,29 @@ static void fetch_openweather(const nextube_config_t *cfg)
     free(body);
     if (!root) { ESP_LOGW(TAG, "OWM: JSON parse failed"); return; }
 
+    /* Parse into locals before taking the mutex */
+    float parsed_temp = 0.0f, parsed_hum = 0.0f;
+    bool  have_temp = false, have_hum = false;
+    char  parsed_condition[64] = {0};
+    char  parsed_icon[32] = {0};
+    bool  have_condition = false, have_icon = false;
+
     cJSON *main_obj = cJSON_GetObjectItem(root, "main");
     if (main_obj) {
         cJSON *temp = cJSON_GetObjectItem(main_obj, "temp");
         cJSON *hum  = cJSON_GetObjectItem(main_obj, "humidity");
-        if (temp) s_weather.temp_c   = (float)temp->valuedouble;
-        if (hum)  s_weather.humidity = (float)hum->valuedouble;
+        if (temp) { parsed_temp = (float)temp->valuedouble; have_temp = true; }
+        if (hum)  { parsed_hum  = (float)hum->valuedouble;  have_hum  = true; }
     }
     cJSON *w0 = cJSON_GetArrayItem(cJSON_GetObjectItem(root, "weather"), 0);
     if (w0) {
         cJSON *desc = cJSON_GetObjectItem(w0, "main");
         cJSON *icon = cJSON_GetObjectItem(w0, "icon");
-        if (desc && desc->valuestring)
-            strncpy(s_weather.condition, desc->valuestring,
-                    sizeof(s_weather.condition) - 1);
+        if (desc && desc->valuestring) {
+            strncpy(parsed_condition, desc->valuestring,
+                    sizeof(parsed_condition) - 1);
+            have_condition = true;
+        }
         /* OWM returns codes like "01d","02n" etc. Map to SPIFFS filenames. */
         if (icon && icon->valuestring) {
             const char *ic = icon->valuestring;
@@ -185,12 +214,21 @@ static void fetch_openweather(const nextube_config_t *cfg)
             else if (strncmp(ic, "13", 2) == 0) mapped = "snow";
             else if (strncmp(ic, "50", 2) == 0) mapped = "fog";
             else                                 mapped = "sun";
-            strncpy(s_weather.icon, mapped, sizeof(s_weather.icon) - 1);
+            strncpy(parsed_icon, mapped, sizeof(parsed_icon) - 1);
+            have_icon = true;
         }
     }
+
+    xSemaphoreTake(s_wx_mutex, portMAX_DELAY);
+    if (have_temp)      s_weather.temp_c   = parsed_temp;
+    if (have_hum)       s_weather.humidity = parsed_hum;
+    if (have_condition) strncpy(s_weather.condition, parsed_condition, sizeof(s_weather.condition) - 1);
+    if (have_icon)      strncpy(s_weather.icon, parsed_icon, sizeof(s_weather.icon) - 1);
     s_weather.valid = true;
+    xSemaphoreGive(s_wx_mutex);
+
     ESP_LOGI(TAG, "OWM: %.0f°C  %d%%  %s",
-             s_weather.temp_c, (int)s_weather.humidity, s_weather.condition);
+             parsed_temp, (int)parsed_hum, parsed_condition);
     cJSON_Delete(root);
 }
 
@@ -362,16 +400,34 @@ static void fetch_open_meteo(const nextube_config_t *cfg)
         cJSON *temp = cJSON_GetObjectItem(cur, "temperature_2m");
         cJSON *hum  = cJSON_GetObjectItem(cur, "relative_humidity_2m");
         cJSON *wc   = cJSON_GetObjectItem(cur, "weather_code");
-        if (temp) s_weather.temp_c   = (float)temp->valuedouble;
-        if (hum)  s_weather.humidity = (float)hum->valuedouble;
+
+        float parsed_temp = 0.0f, parsed_hum = 0.0f;
+        bool  have_temp = false, have_hum = false;
+        char  parsed_icon[32] = {0};
+        char  parsed_condition[64] = {0};
+        bool  have_wc = false;
+
+        if (temp) { parsed_temp = (float)temp->valuedouble; have_temp = true; }
+        if (hum)  { parsed_hum  = (float)hum->valuedouble;  have_hum  = true; }
         if (wc) {
             int code = wc->valueint;
-            strncpy(s_weather.icon,      wmo_icon(code),      sizeof(s_weather.icon) - 1);
-            strncpy(s_weather.condition, wmo_condition(code),  sizeof(s_weather.condition) - 1);
+            strncpy(parsed_icon,      wmo_icon(code),      sizeof(parsed_icon) - 1);
+            strncpy(parsed_condition, wmo_condition(code),  sizeof(parsed_condition) - 1);
+            have_wc = true;
+        }
+
+        xSemaphoreTake(s_wx_mutex, portMAX_DELAY);
+        if (have_temp) s_weather.temp_c   = parsed_temp;
+        if (have_hum)  s_weather.humidity = parsed_hum;
+        if (have_wc) {
+            strncpy(s_weather.icon,      parsed_icon,      sizeof(s_weather.icon) - 1);
+            strncpy(s_weather.condition, parsed_condition,  sizeof(s_weather.condition) - 1);
         }
         s_weather.valid = true;
+        xSemaphoreGive(s_wx_mutex);
+
         ESP_LOGI(TAG, "Open-Meteo: %.0f°C  %d%%  %s",
-                 s_weather.temp_c, (int)s_weather.humidity, s_weather.condition);
+                 parsed_temp, (int)parsed_hum, parsed_condition);
     }
     cJSON_Delete(root);
 }
@@ -545,6 +601,7 @@ static void fetch_met_no(const nextube_config_t *cfg)
         ESP_LOGW(TAG, "Met.no: could not parse temperature/humidity"); return;
     }
 
+    xSemaphoreTake(s_wx_mutex, portMAX_DELAY);
     if (got_temp) s_weather.temp_c   = temp;
     if (got_hum)  s_weather.humidity = hum;
     if (got_sym) {
@@ -552,8 +609,9 @@ static void fetch_met_no(const nextube_config_t *cfg)
         strncpy(s_weather.condition, metno_condition(symbol),  sizeof(s_weather.condition) - 1);
     }
     s_weather.valid = true;
+    xSemaphoreGive(s_wx_mutex);
     ESP_LOGI(TAG, "Met.no: %.0f°C  %d%%  %s",
-             s_weather.temp_c, (int)s_weather.humidity, s_weather.condition);
+             temp, (int)hum, s_weather.condition);
 }
 
 /* ── Task ───────────────────────────────────────────────────────────── */
@@ -599,5 +657,21 @@ static void weather_task(void *arg)
     }
 }
 
-void weather_start(void) { xTaskCreate(weather_task, "weather", 8192, NULL, 3, NULL); }
-const weather_data_t *weather_get(void) { return &s_weather; }
+void weather_start(void)
+{
+    s_wx_mutex = xSemaphoreCreateMutex();
+    xTaskCreate(weather_task, "weather", 8192, NULL, 3, NULL);
+}
+
+const weather_data_t *weather_get(void)
+{
+    static weather_data_t copy;
+    if (s_wx_mutex) {
+        xSemaphoreTake(s_wx_mutex, portMAX_DELAY);
+        copy = s_weather;
+        xSemaphoreGive(s_wx_mutex);
+    } else {
+        copy = s_weather;
+    }
+    return &copy;
+}

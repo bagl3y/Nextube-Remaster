@@ -67,6 +67,8 @@ static void set_defaults(void)
     s_cfg.pomodoro_break    = 5;
     s_cfg.album_switch_ms   = 2000;
     s_cfg.weather_panel_ms  = 5000;  /* 5 s between temp and humidity panels */
+    s_cfg.weather_panel0_en = true;  /* temperature panel on by default */
+    s_cfg.weather_panel1_en = true;  /* humidity panel on by default */
 
     /* Rotation off by default; user must explicitly enable it */
     s_cfg.rotation_enabled    = false;
@@ -146,6 +148,8 @@ static void parse_json(const char *json)
     json_read_str(root, "tone_file",        s_cfg.tone_file,       sizeof(s_cfg.tone_file));
     json_read_str(root, "timer_file",       s_cfg.timer_file,      sizeof(s_cfg.timer_file));
     json_read_str(root, "click_file",       s_cfg.click_file,      sizeof(s_cfg.click_file));
+    json_read_str(root, "ntp_server",      s_cfg.ntp_server,      sizeof(s_cfg.ntp_server));
+    json_read_str(root, "hostname",        s_cfg.hostname,        sizeof(s_cfg.hostname));
     {
         cJSON *bs = cJSON_GetObjectItem(root, "button_sound");
         if (cJSON_IsBool(bs)) s_cfg.button_sound = cJSON_IsTrue(bs);
@@ -174,6 +178,13 @@ static void parse_json(const char *json)
     json_read_u16(root, "album_switch_time",      &s_cfg.album_switch_ms);
     json_read_u16(root, "weather_panel_ms",       &s_cfg.weather_panel_ms);
     if (s_cfg.weather_panel_ms < 1000) s_cfg.weather_panel_ms = 5000; /* floor: 1 s */
+    /* Panel enable flags — default true; force true if both would be false */
+    cJSON *p0 = cJSON_GetObjectItem(root, "weather_panel0_en");
+    cJSON *p1 = cJSON_GetObjectItem(root, "weather_panel1_en");
+    s_cfg.weather_panel0_en = p0 ? cJSON_IsTrue(p0) : true;
+    s_cfg.weather_panel1_en = p1 ? cJSON_IsTrue(p1) : true;
+    if (!s_cfg.weather_panel0_en && !s_cfg.weather_panel1_en)
+        s_cfg.weather_panel0_en = true; /* guard: at least one panel must be on */
 
     /* Backlight mode */
     char bl_mode[16] = {0};
@@ -181,6 +192,7 @@ static void parse_json(const char *json)
     if      (strcmp(bl_mode, "Static")  == 0) s_cfg.backlight_mode = BL_MODE_STATIC;
     else if (strcmp(bl_mode, "Breath")  == 0) s_cfg.backlight_mode = BL_MODE_BREATH;
     else if (strcmp(bl_mode, "Rainbow") == 0) s_cfg.backlight_mode = BL_MODE_RAINBOW;
+    else if (strcmp(bl_mode, "Off")     == 0) s_cfg.backlight_mode = BL_MODE_OFF;
 
     char bl_onoff[8] = {0};
     json_read_str(root, "backlight_onoff", bl_onoff, sizeof(bl_onoff));
@@ -249,6 +261,7 @@ static bool load_from_flash(void)
     if (sz <= 0 || sz > 8192) { fclose(f); return false; }
 
     char *buf = malloc(sz + 1);
+    if (!buf) { fclose(f); return false; }
     fread(buf, 1, sz, f);
     buf[sz] = '\0';
     fclose(f);
@@ -300,8 +313,10 @@ bool config_set_json(const char *json, size_t len)
 
 char *config_to_json(void)
 {
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+
     cJSON *root = cJSON_CreateObject();
-    if (!root) return NULL;
+    if (!root) { xSemaphoreGive(s_mutex); return NULL; }
 
     /* apps array (for backward compat with original firmware format) */
     cJSON *apps = cJSON_AddArrayToObject(root, "apps");
@@ -330,6 +345,8 @@ char *config_to_json(void)
     cJSON_AddStringToObject(root, "tone_file",        s_cfg.tone_file);
     cJSON_AddStringToObject(root, "timer_file",       s_cfg.timer_file);
     cJSON_AddStringToObject(root, "click_file",       s_cfg.click_file);
+    cJSON_AddStringToObject(root, "ntp_server",      s_cfg.ntp_server);
+    cJSON_AddStringToObject(root, "hostname",        s_cfg.hostname);
     cJSON_AddBoolToObject  (root, "button_sound",     s_cfg.button_sound);
     cJSON_AddNumberToObject(root, "volume",           s_cfg.volume);
     cJSON_AddNumberToObject(root, "lcd_brightness",   s_cfg.lcd_brightness);
@@ -339,9 +356,13 @@ char *config_to_json(void)
     cJSON_AddNumberToObject(root, "pomodoro_break",         s_cfg.pomodoro_break);
     cJSON_AddNumberToObject(root, "album_switch_time",      s_cfg.album_switch_ms);
     cJSON_AddNumberToObject(root, "weather_panel_ms",       s_cfg.weather_panel_ms);
+    cJSON_AddBoolToObject  (root, "weather_panel0_en",      s_cfg.weather_panel0_en);
+    cJSON_AddBoolToObject  (root, "weather_panel1_en",      s_cfg.weather_panel1_en);
 
     const char *bl_modes[] = {"Static","Breath","Rainbow","Off"};
-    cJSON_AddStringToObject(root, "backlight_mode",  bl_modes[s_cfg.backlight_mode]);
+    unsigned bl_idx = (unsigned)s_cfg.backlight_mode;
+    if (bl_idx >= sizeof(bl_modes) / sizeof(bl_modes[0])) bl_idx = 0;
+    cJSON_AddStringToObject(root, "backlight_mode",  bl_modes[bl_idx]);
     cJSON_AddStringToObject(root, "backlight_onoff", s_cfg.backlight_on ? "ON" : "OFF");
     cJSON_AddNumberToObject(root, "enabled_modes",      s_cfg.enabled_modes);
     cJSON_AddBoolToObject  (root, "rotation_enabled",   s_cfg.rotation_enabled);
@@ -358,6 +379,7 @@ char *config_to_json(void)
 
     char *out = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
+    xSemaphoreGive(s_mutex);
     return out;
 }
 

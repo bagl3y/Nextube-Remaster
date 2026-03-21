@@ -86,6 +86,8 @@ typedef struct {
 
     /* Weather panel rotation interval (ms between temp/humidity panel switch) */
     uint16_t         weather_panel_ms;
+    bool             weather_panel0_en;  /* true = show temperature panel */
+    bool             weather_panel1_en;  /* true = show humidity panel    */
 
     /* Mode Rotation – auto-cycle through enabled modes on a timer.
      * When rotation_enabled is false the mode never changes automatically;

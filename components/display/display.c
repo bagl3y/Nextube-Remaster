@@ -856,18 +856,28 @@ static void render_weather(const nextube_config_t *cfg, int panel)
     }
 
     /* ── Panel 0: temperature ──────────────────────────────────────── */
-    /* Layout: 0=blank  1=minus/blank  2=tens/blank  3=units  4=°C/°F  5=icon */
+    /* Layout: 0=blank  1=minus/blank  2=tens/blank  3=units  4=°C/°F  5=icon
+     *
+     * minus.jpg and degreec/f.jpg are small sprites (13×36 and 41×36).
+     * Both are composited over blank.jpg via diff-key blend so the tube
+     * background shows correctly for every theme.
+     * blank_path is built once and shared by both blended calls. */
 
     /* Prime flip animation cache — degree symbol is always on tube 4 */
     flip_prime_blank(4, cfg->theme);
 
+    /* Build blank path once — reused for minus (tube 1) and °C/°F (tube 4) */
+    char blank_path[256];
+    display_path_ampm(blank_path, sizeof(blank_path), cfg->theme, "blank");
+
     /* Tube 0: always blank */
     display_show_ampm(0, "blank", cfg->theme);
 
-    /* Tube 1: minus sign for negative, blank for positive */
+    /* Tube 1: minus sign (negative temp) or blank — diff-key composite over blank
+     * so the narrow 13×36 sprite is centred on the full-tube background. */
     if (negative) {
         display_path_temperature(path, sizeof(path), cfg->theme, "minus");
-        display_show_image(1, path);
+        display_show_image_blended(1, blank_path, path);
     } else {
         display_show_ampm(1, "blank", cfg->theme);
     }
@@ -885,8 +895,6 @@ static void render_weather(const nextube_config_t *cfg, int panel)
     display_show_image(3, path);
 
     /* Tube 4: °C / °F — diff-key composite over blank */
-    char blank_path[256];
-    display_path_ampm(blank_path, sizeof(blank_path), cfg->theme, "blank");
     display_path_temperature(path, sizeof(path), cfg->theme, unit);
     display_show_image_blended(4, blank_path, path);
 }
@@ -1096,33 +1104,51 @@ static void display_task(void *arg)
             const weather_data_t *w = weather_get();
             bool now_valid  = (w != NULL && w->valid);
 
-            /* Panel auto-switch: flip between temp (0) and humidity (1) every
-             * WEATHER_PANEL_MS ms, but only once we have valid data. */
+            /* Panel auto-switch: cycle temp (0) ↔ humidity (1) on a timer.
+             * Respects weather_panel0_en / weather_panel1_en — if only one
+             * panel is enabled it is shown exclusively; if both are enabled
+             * they alternate every weather_panel_ms ms. */
             bool panel_flipped = false;
             if (now_valid) {
-                TickType_t now_t = xTaskGetTickCount();
-                if (weather_panel_tick == 0) {
-                    weather_panel_tick = now_t;           /* arm timer on first valid frame */
-                } else if ((now_t - weather_panel_tick) >= pdMS_TO_TICKS(
-                               cfg->weather_panel_ms ? cfg->weather_panel_ms : 5000)) {
-                    weather_panel      = 1 - weather_panel;
-                    weather_panel_tick = now_t;
-                    panel_flipped      = true;
+                bool p0 = cfg->weather_panel0_en;
+                bool p1 = cfg->weather_panel1_en;
+
+                /* If the currently active panel has been disabled, jump to the
+                 * other one immediately without waiting for the rotation timer. */
+                if (weather_panel == 0 && !p0 && p1) {
+                    weather_panel = 1; weather_panel_tick = 0; panel_flipped = true;
+                } else if (weather_panel == 1 && !p1 && p0) {
+                    weather_panel = 0; weather_panel_tick = 0; panel_flipped = true;
+                } else if (p0 && p1) {
+                    /* Both enabled — rotate on the configured interval */
+                    TickType_t now_t = xTaskGetTickCount();
+                    if (weather_panel_tick == 0) {
+                        weather_panel_tick = now_t;       /* arm timer on first valid frame */
+                    } else if ((now_t - weather_panel_tick) >= pdMS_TO_TICKS(
+                                   cfg->weather_panel_ms ? cfg->weather_panel_ms : 5000)) {
+                        weather_panel      = 1 - weather_panel;
+                        weather_panel_tick = now_t;
+                        panel_flipped      = true;
+                    }
                 }
+                /* Single-panel-only case: weather_panel is already correct (clamped above),
+                 * timer is irrelevant — no further action needed. */
             }
 
             /* Trigger re-render when: first draw, mode/theme change, new data
              * values arrived, validity flips, OR the panel just switched. */
-            bool fahrenheit = (strncmp(cfg->temp_format, "Fahrenheit", 10) == 0);
-            float cur_tf  = fahrenheit ? w->temp_c    * 9.0f / 5.0f + 32.0f : w->temp_c;
-            float last_tf = fahrenheit ? last_temp_c  * 9.0f / 5.0f + 32.0f : last_temp_c;
-            int cur_t_i   = (int)(cur_tf  < -0.5f ? -cur_tf  + 0.5f : cur_tf  + 0.5f);
-            int last_t_i  = (int)(last_tf < -0.5f ? -last_tf + 0.5f : last_tf + 0.5f);
-            bool cur_neg  = (cur_tf  < -0.5f);
-            bool last_neg = (last_tf < -0.5f);
-            bool wx_changed = now_valid && last_wx_valid &&
-                              (cur_t_i != last_t_i || cur_neg != last_neg ||
-                               (int)(w->humidity + 0.5f) != (int)(last_hum + 0.5f));
+            bool wx_changed = false;
+            if (now_valid && last_wx_valid) {
+                bool fahrenheit = (strncmp(cfg->temp_format, "Fahrenheit", 10) == 0);
+                float cur_tf  = fahrenheit ? w->temp_c    * 9.0f / 5.0f + 32.0f : w->temp_c;
+                float last_tf = fahrenheit ? last_temp_c  * 9.0f / 5.0f + 32.0f : last_temp_c;
+                int cur_t_i   = (int)(cur_tf  < -0.5f ? -cur_tf  + 0.5f : cur_tf  + 0.5f);
+                int last_t_i  = (int)(last_tf < -0.5f ? -last_tf + 0.5f : last_tf + 0.5f);
+                bool cur_neg  = (cur_tf  < -0.5f);
+                bool last_neg = (last_tf < -0.5f);
+                wx_changed = (cur_t_i != last_t_i || cur_neg != last_neg ||
+                              (int)(w->humidity + 0.5f) != (int)(last_hum + 0.5f));
+            }
             bool valid_changed = (now_valid != last_wx_valid);
             if (first || mode_changed || theme_changed || wx_changed || valid_changed || panel_flipped) {
                 render_weather(cfg, weather_panel);

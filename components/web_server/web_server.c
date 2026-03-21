@@ -107,6 +107,11 @@ static esp_err_t api_audio_play(httpd_req_t *r)
         cJSON_Delete(root);
         return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Missing file"), ESP_FAIL;
     }
+    /* Validate path: must start with /spiffs/audio/ and not contain ".." */
+    if (strncmp(f->valuestring, "/spiffs/audio/", 14) != 0 || strstr(f->valuestring, "..")) {
+        cJSON_Delete(root);
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Invalid audio path"), ESP_FAIL;
+    }
     ESP_LOGI("web_srv", "Audio test: %s", f->valuestring);
     audio_play_file(f->valuestring);
     cJSON_Delete(root);
@@ -191,14 +196,14 @@ static esp_err_t api_status(httpd_req_t *r)
     cJSON_AddBoolToObject(root, "wifi_connected", wifi_manager_is_connected());
     cJSON_AddStringToObject(root, "ip", wifi_manager_get_ip());
     const weather_data_t *w = weather_get();
-    if (w->valid) {
+    if (w && w->valid) {
         cJSON *wj = cJSON_AddObjectToObject(root, "weather");
         cJSON_AddNumberToObject(wj, "temp_c", w->temp_c);
         cJSON_AddNumberToObject(wj, "humidity", w->humidity);
         cJSON_AddStringToObject(wj, "condition", w->condition);
     }
     const sub_count_t *s = youtube_bili_get();
-    if (s->valid) cJSON_AddNumberToObject(root, "subscribers", s->subscriber_count);
+    if (s && s->valid) cJSON_AddNumberToObject(root, "subscribers", s->subscriber_count);
     cJSON_AddNumberToObject(root, "heap_free", esp_get_free_heap_size());
     cJSON_AddStringToObject(root, "firmware", FW_VERSION_STR);
     /* Read the SPIFFS-side version so the UI can warn when firmware and web
@@ -228,6 +233,7 @@ static esp_err_t api_ota(httpd_req_t *r)
         return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA begin fail"), ESP_FAIL;
 
     char *buf = malloc(4096);
+    if (!buf) return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL;
     int rem = r->content_len;
     bool first_chunk = true;
 
@@ -530,6 +536,13 @@ static esp_err_t api_file_download(httpd_req_t *r)
     httpd_resp_set_type(r, content_type(p));
     httpd_resp_set_hdr(r, "Access-Control-Allow-Origin", "*");
     const char *fname = strrchr(p, '/'); fname = fname ? fname + 1 : p;
+    /* Sanitize filename for Content-Disposition — reject CR/LF/quotes */
+    for (const char *c = fname; *c; c++) {
+        if (*c == '\r' || *c == '\n' || *c == '"') {
+            fclose(f);
+            return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "Invalid filename"), ESP_FAIL;
+        }
+    }
     char disp[280];   /* 23 ("attachment; filename=\"\"") + 255 (max fname) + NUL */
     snprintf(disp, sizeof(disp), "attachment; filename=\"%s\"", fname);
     httpd_resp_set_hdr(r, "Content-Disposition", disp);
