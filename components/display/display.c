@@ -243,20 +243,26 @@ void display_show_image(int tube, const char *path)
 }
 
 /* ── Blended image display ──────────────────────────────────────────────
- * Decode base_path and overlay_path (both must be LCD_WIDTH × LCD_HEIGHT),
- * composite them with an OR-blend (overlay's non-black pixels win), and
- * push the result to the tube.  This produces a degree symbol (from
- * Temperature/degreec.jpg or degreef.jpg) on top of a blank tube background
- * (AMPM/blank.jpg) without depending on a pre-composited theme asset.
+ * Decode base_path (LCD_WIDTH × LCD_HEIGHT) and overlay_path (any size),
+ * composite them with a diff-key blend, then push the result to the tube.
+ * Used to show a degree symbol (Temperature/degreec.jpg or degreef.jpg)
+ * correctly on top of the theme's blank tube background (AMPM/blank.jpg).
  *
- * OR-blend: result[i] = base[i] | overlay[i]
- *   • Where the overlay has dark/near-black background bytes (≈ 0x00):
- *     result ≈ base  →  blank background shows through.
- *   • Where the overlay has bright symbol pixels (high byte values):
- *     result ≈ overlay  →  degree symbol shows on top.
+ * Diff-key blend algorithm:
+ *   For each pixel in the overlay (centered on base):
+ *     diff = |overlay_byte0 - base_byte0| + |overlay_byte1 - base_byte1|
+ *     if diff > BLEND_DIFF_THRESH  →  use overlay pixel  (symbol colour)
+ *     else                         →  keep base pixel    (blank background)
+ *
+ * This is theme-agnostic: it detects the symbol by how much it differs
+ * from what the blank background looks like at that exact position, so it
+ * works for both dark-background themes (NixieOY amber) and bright ones.
+ * JPEG compression artifacts (±5 levels) stay below the threshold.
  *
  * Falls back gracefully: if overlay decode fails, shows base alone;
  * if base also fails, fills black. */
+#define BLEND_DIFF_THRESH 28   /* ~11 levels per byte; above JPEG noise floor */
+
 static void display_show_image_blended(int tube,
                                         const char *base_path,
                                         const char *overlay_path)
@@ -268,7 +274,7 @@ static void display_show_image_blended(int tube,
     if (!base) { display_fill(tube, 0x0000); return; }
 
     if (bw != LCD_WIDTH || bh != LCD_HEIGHT) {
-        /* Unexpected size — show base as-is */
+        /* Unexpected base size — show base as-is */
         display_show_digit(tube, base, bw, bh);
         free(base);
         return;
@@ -277,8 +283,8 @@ static void display_show_image_blended(int tube,
     int ow = 0, oh = 0;
     uint8_t *overlay = jpeg_decode_psram(overlay_path, &ow, &oh);
     if (overlay) {
-        /* Center overlay in case it's smaller than LCD_WIDTH x LCD_HEIGHT */
-        int start_x = (LCD_WIDTH - ow) / 2;
+        /* Center overlay on base (handles both small sprites and full-tube images) */
+        int start_x = (LCD_WIDTH  - ow) / 2;
         int start_y = (LCD_HEIGHT - oh) / 2;
         if (start_x < 0) start_x = 0;
         if (start_y < 0) start_y = 0;
@@ -290,12 +296,18 @@ static void display_show_image_blended(int tube,
                 int dest_x = start_x + x;
                 if (dest_x >= LCD_WIDTH) continue;
 
-                int src_idx = (y * ow + x) * 2;
+                int src_idx = (y  * ow         + x)      * 2;
                 int dst_idx = (dest_y * LCD_WIDTH + dest_x) * 2;
 
-                /* OR-blend: overlay non-black pixels overwrite base */
-                base[dst_idx]     |= overlay[src_idx];
-                base[dst_idx + 1] |= overlay[src_idx + 1];
+                /* Diff-key: use overlay where it meaningfully differs from
+                 * blank at this position (symbol pixels), keep blank where
+                 * the overlay background matches (background pixels). */
+                int diff = abs((int)overlay[src_idx]     - (int)base[dst_idx])
+                         + abs((int)overlay[src_idx + 1] - (int)base[dst_idx + 1]);
+                if (diff > BLEND_DIFF_THRESH) {
+                    base[dst_idx]     = overlay[src_idx];
+                    base[dst_idx + 1] = overlay[src_idx + 1];
+                }
             }
         }
         free(overlay);
@@ -530,6 +542,9 @@ void display_path_weather(char *buf, size_t n, const char *theme, const char *co
 
 void display_path_temperature(char *buf, size_t n, const char *theme, const char *name)
 { snprintf(buf, n, "/images/themes/%s/MutiInfo/Temperature/%s.jpg", theme, name); }
+
+void display_path_humidity(char *buf, size_t n, const char *theme, const char *name)
+{ snprintf(buf, n, "/images/themes/%s/MutiInfo/Humidity/%s.jpg", theme, name); }
 
 void display_path_weekday(char *buf, size_t n, const char *theme, int wday)
 {
@@ -813,24 +828,35 @@ static void render_weather(const nextube_config_t *cfg, int panel)
     display_show_image(5, path);
 
     /* ── Panel 1: humidity ─────────────────────────────────────────── */
+    /* Layout: 0=blank  1=blank  2=tens/blank  3=units  4=%  5=icon */
     if (panel == 1) {
+        char blank_path[256];
+        display_path_ampm(blank_path, sizeof(blank_path), cfg->theme, "blank");
+
         display_show_ampm(0, "blank", cfg->theme);
         display_show_ampm(1, "blank", cfg->theme);
-        display_show_ampm(2, "blank", cfg->theme);
+
+        /* Tube 2: tens digit of humidity (blank if < 10) */
         if (hum / 10 == 0) {
-            display_show_ampm(3, "blank", cfg->theme);
+            display_show_ampm(2, "blank", cfg->theme);
         } else {
             display_path_number(path, sizeof(path), cfg->theme, hum / 10);
-            display_show_image(3, path);
+            display_show_image(2, path);
         }
+
+        /* Tube 3: units digit of humidity */
         display_path_number(path, sizeof(path), cfg->theme, hum % 10);
-        display_show_image(4, path);
+        display_show_image(3, path);
+
+        /* Tube 4: % symbol — diff-key composite over blank */
+        display_path_humidity(path, sizeof(path), cfg->theme, "humidity");
+        display_show_image_blended(4, blank_path, path);
+
         return;
     }
 
     /* ── Panel 0: temperature ──────────────────────────────────────── */
-    /* Layout (all cases):
-     *   0=blank  1=minus/blank  2=tens/blank  3=units  4=°C/°F  5=icon */
+    /* Layout: 0=blank  1=minus/blank  2=tens/blank  3=units  4=°C/°F  5=icon */
 
     /* Prime flip animation cache — degree symbol is always on tube 4 */
     flip_prime_blank(4, cfg->theme);
@@ -846,7 +872,7 @@ static void render_weather(const nextube_config_t *cfg, int panel)
         display_show_ampm(1, "blank", cfg->theme);
     }
 
-    /* Tube 2: tens digit (blank if < 10) */
+    /* Tube 2: tens digit (blank if single-digit temperature) */
     if (temp / 10 == 0) {
         display_show_ampm(2, "blank", cfg->theme);
     } else {
@@ -858,9 +884,11 @@ static void render_weather(const nextube_config_t *cfg, int panel)
     display_path_number(path, sizeof(path), cfg->theme, temp % 10);
     display_show_image(3, path);
 
-    /* Tube 4: °C / °F */
+    /* Tube 4: °C / °F — diff-key composite over blank */
+    char blank_path[256];
+    display_path_ampm(blank_path, sizeof(blank_path), cfg->theme, "blank");
     display_path_temperature(path, sizeof(path), cfg->theme, unit);
-    display_show_image(4, path);
+    display_show_image_blended(4, blank_path, path);
 }
 
 /* ── Timer state ────────────────────────────────────────────────────── */

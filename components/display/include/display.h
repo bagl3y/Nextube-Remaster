@@ -47,6 +47,7 @@ void display_path_number     (char *buf, size_t n, const char *theme, int digit)
 void display_path_ampm       (char *buf, size_t n, const char *theme, const char *name);
 void display_path_weather    (char *buf, size_t n, const char *theme, const char *cond);
 void display_path_temperature(char *buf, size_t n, const char *theme, const char *name);
+void display_path_humidity   (char *buf, size_t n, const char *theme, const char *name);
 void display_path_weekday    (char *buf, size_t n, const char *theme, int wday);
 void display_path_date_digit (char *buf, size_t n, const char *theme, int digit);
 void display_path_system     (char *buf, size_t n, const char *cat,   const char *name);
