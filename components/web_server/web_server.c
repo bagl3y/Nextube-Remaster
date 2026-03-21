@@ -157,7 +157,7 @@ static void schedule_wifi_reconnect(void)
     }
     /* Cancel any pending timer, then fire once after 600 ms */
     esp_timer_stop(s_reconnect_timer);
-    esp_timer_start_once(s_reconnect_timer, 600 * 1000);  /* 600 ms in µs */
+    esp_timer_start_once(s_reconnect_timer, 1500 * 1000);  /* 1500 ms in µs */
 }
 
 static esp_err_t api_post_settings(httpd_req_t *r)

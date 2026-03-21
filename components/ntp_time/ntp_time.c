@@ -41,14 +41,17 @@ static void ntp_task(void *arg)
     /* Wait for WiFi */
     vTaskDelay(pdMS_TO_TICKS(5000));
 
-    /* Set timezone */
+    /* Set timezone.
+     * POSIX TZ strings invert the sign vs conventional UTC notation:
+     *   conventional UTC-6  →  POSIX "UTC+6"
+     * So we negate hrs when building the TZ string but log the conventional sign. */
     char tz[32];
     int hrs = cfg->time_zone / 3600;
     int mins = abs((cfg->time_zone % 3600) / 60);
     snprintf(tz, sizeof(tz), "UTC%+d:%02d", -hrs, mins);
     setenv("TZ", tz, 1);
     tzset();
-    ESP_LOGI(TAG, "Timezone set to %s (offset=%ld)", tz, (long)cfg->time_zone);
+    ESP_LOGI(TAG, "Timezone set to UTC%+d:%02d (offset=%ld s)", hrs, mins, (long)cfg->time_zone);
 
     /* Seed the system clock from the battery-backed RTC so the display shows
      * a reasonable time immediately, before the first NTP sync completes.
@@ -89,7 +92,7 @@ void ntp_apply_timezone(void)
     snprintf(tz, sizeof(tz), "UTC%+d:%02d", -hrs, mins);
     setenv("TZ", tz, 1);
     tzset();
-    ESP_LOGI(TAG, "Timezone updated to %s (offset=%ld s)", tz, (long)cfg->time_zone);
+    ESP_LOGI(TAG, "Timezone updated to UTC%+d:%02d (offset=%ld s)", hrs, mins, (long)cfg->time_zone);
 }
 
 void ntp_time_start(void)
