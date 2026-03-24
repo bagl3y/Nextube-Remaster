@@ -767,9 +767,10 @@ static void render_album(const nextube_config_t *cfg,
 /*
  * Layout: [TT][TT][unit][HH][HH][icon]
  *   Layout (see render_weather() for full table):
- *     positive              : [t/blank][units][C/F][h/blank][hum][icon]
- *     negative single-digit : [-][units][C/F][blank][blank][icon]
- *     negative double-digit : [-][tens][units][C/F][blank][icon]
+ *     positive 1-digit      : [blank][blank][units][C/F][icon]
+ *     positive 2-digit      : [blank][tens][units][C/F][icon]
+ *     negative 1-digit      : [blank][-][units][C/F][icon]
+ *     negative 2-digit      : [-][tens][units][C/F][icon]
  *   Leading zeros are blank.  Negative temps suppress humidity entirely.
  *   All blank slots use AMPM/blank.jpg for a theme-consistent appearance.
  *   Unit: AMPM/blank.jpg OR-composited with Temperature/degreec.jpg or degreef.jpg
@@ -787,11 +788,10 @@ static void render_album(const nextube_config_t *cfg,
  * Two-panel layout (auto-cycles in the display task):
  *
  *  Panel 0 — temperature (tubes 0-indexed):
- *    All layouts:     tube 0 = blank
- *                     tube 1 = minus (negative) or blank (positive)
- *                     tube 2 = temp tens (blank if single digit)
- *                     tube 3 = temp units
- *                     tube 4 = °C/°F
+ *    positive 1-digit:  0=blank  1=blank  2=blank  3=units  4=°C/°F
+ *    positive 2-digit:  0=blank  1=blank  2=tens   3=units  4=°C/°F
+ *    negative 1-digit:  0=blank  1=blank  2=minus  3=units  4=°C/°F
+ *    negative 2-digit:  0=blank  1=minus  2=tens   3=units  4=°C/°F
  *                     tube 5 = weather icon
  *
  *  Panel 1 — humidity:
@@ -856,38 +856,45 @@ static void render_weather(const nextube_config_t *cfg, int panel)
     }
 
     /* ── Panel 0: temperature ──────────────────────────────────────── */
-    /* Layout: 0=blank  1=minus/blank  2=tens/blank  3=units  4=°C/°F  5=icon
+    /* Layout:
+     *   positive 1-digit :  [blank] [blank] [blank] [units] [°C/°F] [icon]
+     *   positive 2-digit :  [blank] [blank] [tens]  [units] [°C/°F] [icon]
+     *   negative 1-digit :  [blank] [blank] [minus] [units] [°C/°F] [icon]
+     *   negative 2-digit :  [blank] [minus] [tens]  [units] [°C/°F] [icon]
      *
-     * minus.jpg and degreec/f.jpg are small sprites (13×36 and 41×36).
-     * Both are composited over blank.jpg via diff-key blend so the tube
-     * background shows correctly for every theme.
-     * blank_path is built once and shared by both blended calls. */
+     * minus.jpg and degreec/f.jpg are small sprites composited over blank.jpg
+     * via diff-key blend so the tube background shows correctly for every theme.
+     * blank_path is built once and shared by all blended calls. */
 
     /* Prime flip animation cache — degree symbol is always on tube 4 */
     flip_prime_blank(4, cfg->theme);
 
-    /* Build blank path once — reused for minus (tube 1) and °C/°F (tube 4) */
+    /* Build blank path once — reused for minus and °C/°F blended composites */
     char blank_path[256];
     display_path_ampm(blank_path, sizeof(blank_path), cfg->theme, "blank");
+
+    bool single_digit = (temp < 10);
 
     /* Tube 0: always blank */
     display_show_ampm(0, "blank", cfg->theme);
 
-    /* Tube 1: minus sign (negative temp) or blank — diff-key composite over blank
-     * so the narrow 13×36 sprite is centred on the full-tube background. */
-    if (negative) {
+    /* Tube 1: minus (2-digit negative) or blank */
+    if (negative && !single_digit) {
         display_path_temperature(path, sizeof(path), cfg->theme, "minus");
         display_show_image_blended(1, blank_path, path);
     } else {
         display_show_ampm(1, "blank", cfg->theme);
     }
 
-    /* Tube 2: tens digit (blank if single-digit temperature) */
-    if (temp / 10 == 0) {
-        display_show_ampm(2, "blank", cfg->theme);
-    } else {
+    /* Tube 2: minus (1-digit negative), tens digit (2-digit), or blank */
+    if (negative && single_digit) {
+        display_path_temperature(path, sizeof(path), cfg->theme, "minus");
+        display_show_image_blended(2, blank_path, path);
+    } else if (!single_digit) {
         display_path_number(path, sizeof(path), cfg->theme, temp / 10);
         display_show_image(2, path);
+    } else {
+        display_show_ampm(2, "blank", cfg->theme);
     }
 
     /* Tube 3: units digit */

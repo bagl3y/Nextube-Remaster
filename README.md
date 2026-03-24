@@ -189,7 +189,12 @@ After a firmware-only OTA, the web UI shows a warning banner if the SPIFFS web U
 
 On first boot (or whenever home WiFi is not configured/unreachable) the device broadcasts a `Nextube-Setup` open WiFi AP. Connect to it and navigate to **http://192.168.4.1** to configure your network.
 
-Once the device connects to your home network the setup AP automatically shuts down after **60 seconds** — enough time to finish loading the web UI before it disappears. If the home network is later lost the AP comes back immediately so you can always reach the device for re-configuration.
+**AP lifecycle:**
+- **No credentials saved** — AP stays open indefinitely for first-time setup.
+- **Credentials saved, STA connects** — AP shuts down **60 seconds** after the device gets an IP (gives the browser time to finish loading the UI).
+- **Credentials saved, STA never connects** — AP closes automatically after **3 minutes** so the device doesn't broadcast `Nextube-Setup` indefinitely in a deployed environment. The device keeps retrying STA silently in the background.
+- **STA drops after connecting** — AP comes back immediately so you can always reach the device at `192.168.4.1` to fix credentials.
+- **New credentials saved via UI** — AP reappears and a fresh 3-minute window starts while the device tries the new credentials.
 
 After setup, access the management interface via:
 
@@ -199,8 +204,8 @@ After setup, access the management interface via:
 The web UI provides:
 - **Dashboard** — live status (time, mode, weather, subscribers, heap), quick mode switching
 - **Display** — theme (populated dynamically from SPIFFS — add a folder to `/images/themes/` and it appears automatically), brightness, LED accent lighting effects & per-tube colours, enabled mode toggles, auto mode rotation
-- **Network** — WiFi config, timezone, NTP server
-- **Services** — weather API source (wttr.in / Open-Meteo / OpenWeatherMap / Met.no), city, units, YouTube/Bilibili tracking; countdown duration, Pomodoro work and break durations
+- **Network** — WiFi SSID/password (only reconnects when credentials actually change, preserving the live connection for all other saves), hostname, timezone (UTC offset in hours), NTP server
+- **Services** — weather API source (wttr.in / Open-Meteo / OpenWeatherMap / Met.no), city, units, panel rotation interval, per-panel enable/disable; YouTube/Bilibili tracking; countdown duration, Pomodoro work and break durations
 - **Audio** — volume, sound file selection
 - **System** — firmware OTA, web UI / SPIFFS OTA, SPIFFS file browser (browse/upload/delete), device log viewer, firmware update check (compares against latest GitHub release), factory reset, about (shows firmware + web UI versions independently)
 
@@ -213,7 +218,7 @@ The web UI provides:
 | **Countdown** | Configurable countdown timer. Middle touch pauses/resumes. |
 | **Pomodoro** | Work/break timer with configurable work and break durations. Middle touch pauses/resumes. Automatically flips between work and break phases. |
 | **YouTube** | Live subscriber/follower count |
-| **Weather** | Two panels cycling every 5 s: **Panel 1** — temperature + °C/°F + condition icon; **Panel 2** — humidity + condition icon. Temperatures rounded to whole degrees; leading zeros suppressed. All 6 tubes show `······` (dots) until the first fetch completes. |
+| **Weather** | Two panels cycling on a configurable interval: **Panel 1** — temperature + °C/°F + condition icon; **Panel 2** — humidity + % + condition icon. Either panel can be disabled (but not both). Temperatures rounded to whole degrees; leading zeros suppressed; minus sign position shifts with digit count. All 6 tubes show `······` (dots) until the first fetch completes. |
 | **Album** | Slideshow of JPEGs from `/images/album/` |
 | **Scoreboard** | Stub — displays zeros |
 
@@ -242,20 +247,24 @@ Weather mode cycles through all enabled weather APIs until one succeeds. Support
 
 Weather fetching: On WiFi connect the first fetch happens immediately with automatic 5-second retries until data arrives. After the first successful fetch, weather is refreshed every 10 minutes.
 
-Weather mode auto-cycles between two panels every 5 seconds:
+Weather mode auto-cycles between two panels on a configurable interval (default 5 s). Either panel can be disabled in **Services → Weather → Display Panels**, but not both simultaneously.
 
 **Panel 1 — temperature + icon:**
 ```
-All layouts: [blank] [−/blank] [tens/blank] [units] [°C/°F] [icon]
-e.g.  2°C :  _        _           _            2      °C     ☁
-e.g. 15°C :  _        _           1            5      °C     ☁
-e.g.  −7°C:  _        −           _            7      °C     ☁
-e.g. −23°C:  _        −           2            3      °C     ☁
+positive 1-digit:  [blank] [blank] [blank] [units] [°C/°F] [icon]
+positive 2-digit:  [blank] [blank] [tens]  [units] [°C/°F] [icon]
+negative 1-digit:  [blank] [blank] [−]     [units] [°C/°F] [icon]
+negative 2-digit:  [blank] [−]     [tens]  [units] [°C/°F] [icon]
+
+e.g.   2°C:  _   _   _   2   °C  ☁
+e.g.  15°C:  _   _   1   5   °C  ☁
+e.g.  −7°C:  _   _   −   7   °C  ☁
+e.g. −23°C:  _   −   2   3   °C  ☁
 ```
 
 **Panel 2 — humidity + icon:**
 ```
-[blank] [blank] [blank] [hum_tens/blank] [hum_units] [icon]
+[blank] [blank] [tens/blank] [units] [%] [icon]
 ```
 
 **Waiting (no data yet):**
@@ -374,7 +383,7 @@ nextube-fw/
 │   ├── touch/                     # Capacitive touch input (L/R = mode cycle, M = pause/resume or backlight)
 │   ├── rtc/                       # PCF8563 RTC driver
 │   ├── audio/                     # DAC audio playback (WAV)
-│   ├── wifi_manager/              # AP+STA WiFi (AP auto-disables 60 s after STA connects)
+│   ├── wifi_manager/              # AP+STA WiFi (3 min boot timeout if STA fails; 60 s graceful shutdown after connect)
 │   ├── web_server/                # HTTP server + REST API + OTA handlers + log viewer
 │   ├── ntp_time/                  # NTP synchronisation
 │   ├── weather/                   # Weather client (wttr.in / Open-Meteo / OWM / Met.no)
