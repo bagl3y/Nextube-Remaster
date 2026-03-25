@@ -154,12 +154,18 @@ void wifi_manager_start(void)
     };
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg));
 
-    /* Configure STA if credentials exist */
+    /* Always push an STA config — even when SSID is empty — so that any
+     * credentials cached by the WiFi driver in its own NVS namespace (from
+     * a previous firmware build that had CONFIG_ESP_WIFI_NVS_ENABLED=y) are
+     * overwritten with blank data.  Without this, devices upgrading from
+     * older firmware would ignore a factory-reset because the driver's NVS
+     * copy still holds the old network. */
+    wifi_config_t sta_cfg = {0};
+    strncpy((char *)sta_cfg.sta.ssid, cfg->ssid, sizeof(sta_cfg.sta.ssid) - 1);
+    strncpy((char *)sta_cfg.sta.password, cfg->password, sizeof(sta_cfg.sta.password) - 1);
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_cfg));
+
     if (strlen(cfg->ssid) > 0) {
-        wifi_config_t sta_cfg = {0};
-        strncpy((char *)sta_cfg.sta.ssid, cfg->ssid, sizeof(sta_cfg.sta.ssid) - 1);
-        strncpy((char *)sta_cfg.sta.password, cfg->password, sizeof(sta_cfg.sta.password) - 1);
-        ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_cfg));
         ESP_LOGI(TAG, "STA: connecting to \"%s\"", cfg->ssid);
         /* Start the boot-window timer.  If STA does not obtain an IP within
          * AP_BOOT_TIMEOUT_US the setup AP is closed to avoid broadcasting

@@ -32,7 +32,12 @@ CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=4096
 
 # Wi-Fi
 CONFIG_ESP_WIFI_SOFTAP_SUPPORT=y
-CONFIG_ESP_WIFI_NVS_ENABLED=y
+# Disable WiFi credential caching in NVS.  The application manages all
+# credentials in its own config.json; having the WiFi driver maintain a
+# parallel copy in NVS means factory reset (which wipes config.json) leaves
+# stale credentials in the driver's NVS namespace and the device reconnects
+# to the old network after reboot as if nothing was wiped.
+CONFIG_ESP_WIFI_NVS_ENABLED=n
 # Double the TX buffer pool (default 32) so TLS handshake packets and
 # concurrent HTTP responses don't compete and cause EAGAIN on sends.
 CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=64

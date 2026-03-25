@@ -47,7 +47,7 @@ static void set_defaults(void)
 
     strcpy(s_cfg.weather_source, "metno"); /* default: free, no API key needed */
     strcpy(s_cfg.weather_api_key, "");
-    strcpy(s_cfg.city, "Airdrie,CA");
+    strcpy(s_cfg.city, "");
     strcpy(s_cfg.temp_format, "Celsius");
 
     strcpy(s_cfg.video_site, "youtube");
