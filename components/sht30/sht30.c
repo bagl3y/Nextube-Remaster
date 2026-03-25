@@ -121,7 +121,9 @@ static void sht30_task(void *arg)
             xSemaphoreTake(s_mutex, portMAX_DELAY);
             s_last = reading;
             xSemaphoreGive(s_mutex);
-            ESP_LOGI(TAG, "%.1f °C  %.1f %%RH", reading.temp_c, reading.humidity);
+            ESP_LOGI(TAG, "%.1f °C  %.1f %%RH  (stack hwm: %u)",
+                     reading.temp_c, reading.humidity,
+                     (unsigned)uxTaskGetStackHighWaterMark(NULL));
         }
         vTaskDelay(pdMS_TO_TICKS(30 * 1000));
     }
@@ -129,7 +131,7 @@ static void sht30_task(void *arg)
 
 void sht30_task_start(void)
 {
-    xTaskCreate(sht30_task, "sht30", 2048, NULL, 4, NULL);
+    xTaskCreate(sht30_task, "sht30", 4096, NULL, 4, NULL);
 }
 
 const sht30_reading_t *sht30_get(void)
