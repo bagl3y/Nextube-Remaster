@@ -204,6 +204,10 @@ static esp_err_t api_post_settings(httpd_req_t *r)
 
 static esp_err_t api_reset(httpd_req_t *r)
 {
+    /* Wipe the WiFi driver's own NVS namespace so the device cannot
+     * reconnect to the old network after reboot.  Must be called while
+     * the WiFi stack is running (before esp_restart). */
+    esp_wifi_restore();
     config_reset();
     send_json(r, "{\"status\":\"ok\"}");
     vTaskDelay(pdMS_TO_TICKS(500));

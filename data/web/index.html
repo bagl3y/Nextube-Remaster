@@ -112,7 +112,10 @@ select option{background:var(--accent);color:var(--text)}
       </div>
     </div>
     <div class="field"><label>Time Format</label>
-      <select id="f-timetype"><option value="24H">24 Hour</option><option value="12H">12 Hour</option></select>
+      <select id="f-timetype" onchange="onTimeTypeChange()"><option value="24H">24 Hour</option><option value="24H_NS">24 Hour (No Sec)</option><option value="12H">12 Hour</option></select>
+    </div>
+    <div class="field" id="tube5-section" style="display:none"><label>Tube 6 Display</label>
+      <select id="f-tube5"><option value="blank">Blank</option><option value="weather">Weather Icon</option></select>
     </div>
     <div class="field meter"><label>LCD Brightness</label><input type="range" id="f-lcdbr" min="0" max="100"><span id="v-lcdbr">30</span>%</div>
     <div class="field meter"><label>LED Brightness</label><input type="range" id="f-ledbr" min="0" max="100"><span id="v-ledbr">60</span>%</div>
@@ -477,7 +480,8 @@ async function loadSettings() {
   if (!cfg) return;
   const a = cfg.apps?.[0] || {};
   $('f-theme').value = a.theme || 'NixieOY';
-  $('f-timetype').value = a.type || '24H';
+  $('f-timetype').value = a.type || '24H'; onTimeTypeChange();
+  $('f-tube5').value = a.clock_tube5 || 'blank';
   $('f-lcdbr').value = cfg.lcd_brightness || 30; $('v-lcdbr').textContent = cfg.lcd_brightness || 30;
   $('f-ledbr').value = cfg.led_brightness || 60; $('v-ledbr').textContent = cfg.led_brightness || 60;
   $('f-blmode').value = cfg.backlight_mode || 'Breath'; onBlModeChange();
@@ -551,6 +555,11 @@ async function loadSettings() {
   });
 }
 
+/* ── Time format change – show tube-6 option only for 24H (No Sec) ── */
+function onTimeTypeChange() {
+  $('tube5-section').style.display = $('f-timetype').value === '24H_NS' ? '' : 'none';
+}
+
 /* ── LED mode change – hide colour pickers for Rainbow / Off ── */
 function onBlModeChange() {
   const mode = $('f-blmode').value;
@@ -587,7 +596,7 @@ async function saveSettings() {
     ($('m-album').checked       ? (1 << 6) : 0) |
     ($('m-weather').checked     ? (1 << 7) : 0);
   const body = {
-    apps: [{ name:'app1', app: cfg.apps?.[0]?.app || 'Clock', theme: $('f-theme').value, type: $('f-timetype').value }],
+    apps: [{ name:'app1', app: cfg.apps?.[0]?.app || 'Clock', theme: $('f-theme').value, type: $('f-timetype').value, clock_tube5: $('f-tube5').value }],
     lcd_brightness: +$('f-lcdbr').value, led_brightness: +$('f-ledbr').value,
     backlight_mode: $('f-blmode').value,
     backlight_RGB: colors.length ? colors : cfg.backlight_RGB,

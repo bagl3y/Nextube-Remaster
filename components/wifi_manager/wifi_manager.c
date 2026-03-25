@@ -154,12 +154,11 @@ void wifi_manager_start(void)
     };
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg));
 
-    /* Always push an STA config — even when SSID is empty — so that any
-     * credentials cached by the WiFi driver in its own NVS namespace (from
-     * a previous firmware build that had CONFIG_ESP_WIFI_NVS_ENABLED=y) are
-     * overwritten with blank data.  Without this, devices upgrading from
-     * older firmware would ignore a factory-reset because the driver's NVS
-     * copy still holds the old network. */
+    /* Always push an STA config — even when SSID is empty — to keep the
+     * WiFi driver's NVS copy in sync with the application's config.json.
+     * This ensures credentials written by wifi_manager_reconnect_sta() are
+     * immediately active and avoids stale NVS data on first boot after a
+     * SPIFFS-only update that wiped config.json. */
     wifi_config_t sta_cfg = {0};
     strncpy((char *)sta_cfg.sta.ssid, cfg->ssid, sizeof(sta_cfg.sta.ssid) - 1);
     strncpy((char *)sta_cfg.sta.password, cfg->password, sizeof(sta_cfg.sta.password) - 1);
