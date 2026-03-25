@@ -38,7 +38,8 @@ typedef struct {
     /* Display */
     app_mode_t       current_mode;
     char             theme[32];
-    char             time_type[8];       /* "12H" or "24H" */
+    char             time_type[8];       /* "12H", "24H", or "24H_NS" */
+    char             clock_tube5[16];    /* tube-5 content in 24H-no-sec mode: "blank"|"weather" */
     uint8_t          lcd_brightness;     /* 0-100 */
     uint8_t          led_brightness;     /* 0-100 */
     backlight_mode_t backlight_mode;

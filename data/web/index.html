@@ -589,7 +589,7 @@ async function saveSettings() {
   const body = {
     apps: [{ name:'app1', app: cfg.apps?.[0]?.app || 'Clock', theme: $('f-theme').value, type: $('f-timetype').value }],
     lcd_brightness: +$('f-lcdbr').value, led_brightness: +$('f-ledbr').value,
-    backlight_mode: $('f-blmode').value, backlight_onoff: $('f-blmode').value === 'Off' ? 'OFF' : 'ON',
+    backlight_mode: $('f-blmode').value,
     backlight_RGB: colors.length ? colors : cfg.backlight_RGB,
     enabled_modes: enabledModes,
     rotation_enabled: $('rot-enabled').checked,

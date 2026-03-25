@@ -26,6 +26,7 @@ static void set_defaults(void)
     s_cfg.current_mode    = APP_MODE_CLOCK;
     strcpy(s_cfg.theme, "NixieOY");
     strcpy(s_cfg.time_type, "24H");
+    strcpy(s_cfg.clock_tube5, "blank");
     s_cfg.lcd_brightness  = 30;
     s_cfg.led_brightness  = 60;
     s_cfg.backlight_mode  = BL_MODE_BREATH;
@@ -131,6 +132,8 @@ static void parse_json(const char *json)
 
         json_read_str(app0, "theme", s_cfg.theme, sizeof(s_cfg.theme));
         json_read_str(app0, "type",  s_cfg.time_type, sizeof(s_cfg.time_type));
+        json_read_str(app0, "clock_tube5", s_cfg.clock_tube5, sizeof(s_cfg.clock_tube5));
+        if (s_cfg.clock_tube5[0] == '\0') strcpy(s_cfg.clock_tube5, "blank");
     }
 
     json_read_str(root, "ssid",             s_cfg.ssid,            sizeof(s_cfg.ssid));
@@ -327,9 +330,10 @@ char *config_to_json(void)
     cJSON *app0 = cJSON_CreateObject();
     cJSON_AddStringToObject(app0, "name", "app1");
 
-    cJSON_AddStringToObject(app0, "app",   app_mode_name(s_cfg.current_mode));
-    cJSON_AddStringToObject(app0, "theme", s_cfg.theme);
-    cJSON_AddStringToObject(app0, "type",  s_cfg.time_type);
+    cJSON_AddStringToObject(app0, "app",        app_mode_name(s_cfg.current_mode));
+    cJSON_AddStringToObject(app0, "theme",      s_cfg.theme);
+    cJSON_AddStringToObject(app0, "type",       s_cfg.time_type);
+    cJSON_AddStringToObject(app0, "clock_tube5", s_cfg.clock_tube5);
     cJSON_AddItemToArray(apps, app0);
 
     cJSON_AddStringToObject(root, "ssid",             s_cfg.ssid);
