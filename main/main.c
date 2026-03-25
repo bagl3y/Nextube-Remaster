@@ -21,6 +21,7 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_ota_ops.h"
 #include "nvs_flash.h"
 #include "esp_event.h"
 #include "esp_netif.h"
@@ -191,6 +192,15 @@ void app_main(void)
     weather_start();
     youtube_bili_start();
     sht30_task_start();    /* no-op task if sensor absent */
+
+    /* Mark this OTA image as valid so the bootloader does not roll back to
+     * the previous firmware on the next reboot.  CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
+     * leaves a freshly-flashed image in ESP_OTA_IMG_PENDING_VERIFY state; if the
+     * app never calls this, the bootloader treats the next reboot as a failed
+     * boot and silently reverts to the previous slot.
+     * Calling here — after all hardware and services initialised without panic —
+     * is the correct point to declare the image healthy. */
+    esp_ota_mark_app_valid_cancel_rollback();
 
     ESP_LOGI(TAG, "All tasks launched – heap free: %u bytes",
              (unsigned)esp_get_free_heap_size());

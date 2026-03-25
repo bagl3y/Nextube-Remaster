@@ -9,9 +9,11 @@ idf_component_register(
         leds
         touch
         rtc
+        sht30
         wifi_manager
         web_server
         ntp_time
         weather
         youtube_bili
+        app_update
 )
