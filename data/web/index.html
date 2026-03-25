@@ -80,6 +80,7 @@ select option{background:var(--accent);color:var(--text)}
       <div class="stat"><div class="val" id="s-time">--:--</div><div class="lbl">Local Time</div></div>
       <div class="stat"><div class="val" id="s-mode">--</div><div class="lbl">Mode</div></div>
       <div class="stat"><div class="val" id="s-temp">--°</div><div class="lbl">Weather</div></div>
+      <div class="stat" id="s-sensor-wrap" style="display:none"><div class="val" id="s-sensor">--°</div><div class="lbl">Local Sensor</div></div>
       <div class="stat"><div class="val" id="s-subs">--</div><div class="lbl">Subscribers</div></div>
       <div class="stat"><div class="val" id="s-heap">--</div><div class="lbl">Free Heap</div></div>
       <div class="stat"><div class="val" id="s-wifi">--</div><div class="lbl">WiFi</div></div>
@@ -883,6 +884,10 @@ async function refreshStatus() {
   $('s-time').textContent = s.time ? s.time.split('T')[1] : '--:--';
   $('s-mode').textContent = s.mode || '--';
   $('s-temp').textContent = s.weather ? s.weather.temp_c.toFixed(1) + '°C' : '--°';
+  if (s.sensor) {
+    $('s-sensor-wrap').style.display = '';
+    $('s-sensor').textContent = s.sensor.temp_c.toFixed(1) + '°C  ' + s.sensor.humidity.toFixed(0) + '%';
+  }
   $('s-subs').textContent = s.subscribers != null ? s.subscribers.toLocaleString() : '--';
   $('s-heap').textContent = s.heap_free ? (s.heap_free/1024).toFixed(0) + 'K' : '--';
   $('s-wifi').textContent = s.wifi_connected ? s.ip : 'No WiFi';

@@ -103,3 +103,8 @@ bool rtc_set_time(const struct tm *t)
     };
     return i2c_write_reg(0x02, data, 7) == ESP_OK;
 }
+
+i2c_master_bus_handle_t pcf8563_get_bus_handle(void)
+{
+    return s_bus;
+}

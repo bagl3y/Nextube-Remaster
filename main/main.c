@@ -35,6 +35,7 @@
 #include "leds.h"
 #include "touch_input.h"
 #include "rtc_pcf8563.h"
+#include "sht30.h"
 #include "wifi_manager.h"
 #include "web_server.h"
 #include "ntp_time.h"
@@ -179,6 +180,7 @@ void app_main(void)
     touch_input_init();
     touch_input_register_callback(on_touch);
     pcf8563_init();
+    sht30_init();          /* probe optional sensor; safe no-op if absent */
 
     /* Networking – start AP+STA, then web server */
     wifi_manager_start();
@@ -188,6 +190,7 @@ void app_main(void)
     ntp_time_start();
     weather_start();
     youtube_bili_start();
+    sht30_task_start();    /* no-op task if sensor absent */
 
     ESP_LOGI(TAG, "All tasks launched – heap free: %u bytes",
              (unsigned)esp_get_free_heap_size());

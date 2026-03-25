@@ -202,7 +202,7 @@ After setup, access the management interface via:
 - **http://\<device-ip\>** (shown on the dashboard and in your router's DHCP table)
 
 The web UI provides:
-- **Dashboard** — live status (time, mode, weather, subscribers, heap), quick mode switching
+- **Dashboard** — live status (time, mode, weather, local sensor temp/humidity if SHT30 fitted, subscribers, heap), quick mode switching
 - **Display** — theme (populated dynamically from SPIFFS — add a folder to `/images/themes/` and it appears automatically), brightness, LED accent lighting effects & per-tube colours, enabled mode toggles, auto mode rotation
 - **Network** — WiFi SSID/password (only reconnects when credentials actually change, preserving the live connection for all other saves), hostname, timezone (UTC offset in hours), NTP server
 - **Services** — weather API source (wttr.in / Open-Meteo / OpenWeatherMap / Met.no), city, units, panel rotation interval, per-panel enable/disable; YouTube/Bilibili tracking; countdown duration, Pomodoro work and break durations
@@ -402,8 +402,8 @@ nextube-fw/
 This is a community reverse-engineering effort. Key areas needing help:
 
 1. ~~**Theme images** — Extract or recreate the Nixie/Digital/Flip digit artwork for the displays~~
-2. **Scoreboard mode** — Complete the score input API and display logic
-3. **SHT30 sensor** — Add temperature/humidity sensor support (I²C addr 0x44)
+2. ~~**SHT30 sensor** — Add temperature/humidity sensor support (I²C addr 0x44)~~
+3. **Scoreboard mode** — Complete the score input API and display logic
 4. **Date face** — Configuration UI for custom digit-mapped date face (mode switching already works)
 
 ## License

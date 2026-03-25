@@ -7,6 +7,7 @@
 #include "display.h"
 #include "leds.h"
 #include "audio.h"
+#include "sht30.h"
 
 #include "esp_log.h"
 #include "esp_http_server.h"
@@ -234,6 +235,12 @@ static esp_err_t api_status(httpd_req_t *r)
         cJSON_AddNumberToObject(wj, "temp_c", w->temp_c);
         cJSON_AddNumberToObject(wj, "humidity", w->humidity);
         cJSON_AddStringToObject(wj, "condition", w->condition);
+    }
+    const sht30_reading_t *sensor = sht30_get();
+    if (sensor && sensor->valid) {
+        cJSON *sj = cJSON_AddObjectToObject(root, "sensor");
+        cJSON_AddNumberToObject(sj, "temp_c",   sensor->temp_c);
+        cJSON_AddNumberToObject(sj, "humidity", sensor->humidity);
     }
     const sub_count_t *s = youtube_bili_get();
     if (s && s->valid) cJSON_AddNumberToObject(root, "subscribers", s->subscriber_count);
