@@ -36,7 +36,14 @@ static esp_timer_handle_t s_ap_boot_timer      = NULL;
  * While true, WIFI_EVENT_STA_DISCONNECTED will NOT re-enable the AP —
  * the device keeps retrying STA silently.  Reset whenever new credentials
  * are saved so the AP comes back up for the new connection attempt. */
-static bool s_ap_boot_expired = false;
+static bool s_ap_boot_expired  = false;
+
+/* Set by wifi_manager_reconnect_sta() before it calls esp_wifi_connect()
+ * directly.  Tells WIFI_EVENT_STA_DISCONNECTED NOT to fire a second
+ * esp_wifi_connect() for that same reconnect attempt, which would create
+ * two concurrent association requests and leave the TCP/IP stack in an
+ * indeterminate state. */
+static bool s_manual_reconnect = false;
 
 static void ap_disable_cb(void *arg)
 {
@@ -69,16 +76,21 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
             esp_wifi_connect();
             break;
         case WIFI_EVENT_STA_DISCONNECTED:
-            ESP_LOGW(TAG, "STA disconnected, retrying...");
             xEventGroupClearBits(s_wifi_events, WIFI_CONNECTED_BIT);
             if (s_ap_disable_timer) esp_timer_stop(s_ap_disable_timer);
-            /* Re-enable the setup AP only if the boot window is still open.
-             * Once s_ap_boot_expired is true the device keeps retrying STA
-             * silently without broadcasting the setup AP. */
             if (!s_ap_boot_expired) {
                 esp_wifi_set_mode(WIFI_MODE_APSTA);
             }
-            esp_wifi_connect();
+            if (s_manual_reconnect) {
+                /* wifi_manager_reconnect_sta() already called esp_wifi_connect()
+                 * directly — skip the auto-reconnect here to avoid a second
+                 * concurrent association attempt. */
+                ESP_LOGI(TAG, "STA disconnected (manual reconnect in progress)");
+                s_manual_reconnect = false;
+            } else {
+                ESP_LOGW(TAG, "STA disconnected, retrying...");
+                esp_wifi_connect();
+            }
             break;
         case WIFI_EVENT_AP_STACONNECTED: {
             wifi_event_ap_staconnected_t *ev = data;
@@ -180,14 +192,21 @@ void wifi_manager_reconnect_sta(void)
     strncpy((char *)sta_cfg.sta.ssid,     cfg->ssid,     sizeof(sta_cfg.sta.ssid)     - 1);
     strncpy((char *)sta_cfg.sta.password, cfg->password, sizeof(sta_cfg.sta.password) - 1);
 
-    /* Apply new credentials BEFORE disconnecting.  The WIFI_EVENT_STA_DISCONNECTED
-     * handler calls esp_wifi_connect() automatically, so by the time it fires the
-     * new SSID/password are already in place.  Calling esp_wifi_connect() here a
-     * second time would create two conflicting association attempts and leave the
-     * TCP/IP stack in an indeterminate state. */
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_cfg));
-    esp_wifi_disconnect();   /* event handler will call esp_wifi_connect() */
-    ESP_LOGI(TAG, "STA: reconnecting to \"%s\"", cfg->ssid);
+
+    /* Set the flag BEFORE calling esp_wifi_disconnect() so that if the
+     * WIFI_EVENT_STA_DISCONNECTED event fires synchronously (or very quickly)
+     * it sees s_manual_reconnect=true and skips its own esp_wifi_connect(). */
+    s_manual_reconnect = true;
+
+    /* esp_wifi_disconnect() stops any in-progress connection attempt.
+     * On first-time credential save the STA was never connected and this
+     * call returns ESP_ERR_WIFI_NOT_CONNECT without firing a disconnect
+     * event — which is exactly why we call esp_wifi_connect() ourselves
+     * rather than relying on the event handler to do it. */
+    esp_wifi_disconnect();
+    esp_wifi_connect();
+    ESP_LOGI(TAG, "STA: connecting to \"%s\"", cfg->ssid);
 }
 
 bool wifi_manager_is_connected(void)

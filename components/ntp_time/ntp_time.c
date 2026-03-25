@@ -57,20 +57,25 @@ static void ntp_task(void *arg)
      * a reasonable time immediately, before the first NTP sync completes.
      * rtc_get_time() returns local time; mktime() interprets it as local
      * (TZ is already set above), producing a correct time_t. */
+    /* Minimum plausible time_t: 2024-01-01 00:00:00 UTC.
+     * Anything earlier means the RTC was never set or has lost power. */
+#define RTC_MIN_VALID_EPOCH  1704067200LL  /* 2024-01-01 */
+
     struct tm rtc_t = {0};
     if (rtc_get_time(&rtc_t)) {
         time_t seed = mktime(&rtc_t);
-        if (seed > 0) {
+        if (seed >= RTC_MIN_VALID_EPOCH) {
             struct timeval tv_seed = { .tv_sec = seed, .tv_usec = 0 };
             settimeofday(&tv_seed, NULL);
-            ESP_LOGI(TAG, "System clock seeded from RTC: %04d-%02d-%02d %02d:%02d:%02d",
+            ESP_LOGI(TAG, "System clock seeded from RTC: %04d-%02d-%02d %02d:%02d:%02d (local)",
                      rtc_t.tm_year + 1900, rtc_t.tm_mon + 1, rtc_t.tm_mday,
                      rtc_t.tm_hour, rtc_t.tm_min, rtc_t.tm_sec);
         } else {
-            ESP_LOGW(TAG, "RTC returned invalid time (seed=%lld) – ignoring", (long long)seed);
+            ESP_LOGW(TAG, "RTC time too old (seed=%lld, min=%lld) — ignoring, waiting for NTP",
+                     (long long)seed, (long long)RTC_MIN_VALID_EPOCH);
         }
     } else {
-        ESP_LOGW(TAG, "RTC read failed – clock starts at epoch until NTP sync");
+        ESP_LOGW(TAG, "RTC read failed — clock starts at epoch until NTP sync");
     }
 
     esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);

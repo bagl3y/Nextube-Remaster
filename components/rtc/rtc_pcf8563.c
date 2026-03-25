@@ -76,15 +76,51 @@ bool rtc_get_time(struct tm *t)
 
     uint8_t data[7];
     esp_err_t err = i2c_read_reg(0x02, data, 7);
-    if (err != ESP_OK) return false;
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "I²C read failed: %s", esp_err_to_name(err));
+        return false;
+    }
 
-    t->tm_sec  = bcd2dec(data[0] & 0x7F);
-    t->tm_min  = bcd2dec(data[1] & 0x7F);
-    t->tm_hour = bcd2dec(data[2] & 0x3F);
-    t->tm_mday = bcd2dec(data[3] & 0x3F);
+    /* Bit 7 of the seconds register is the Voltage Low (VL) flag.
+     * When set the PCF8563 is signalling that the RTC crystal has been
+     * without power long enough that the clock data may be corrupt.
+     * Reject the read so callers don't seed the system clock with
+     * garbage and show wildly wrong times. */
+    if (data[0] & 0x80) {
+        ESP_LOGW(TAG, "VL flag set — RTC data unreliable (raw: "
+                 "%02x %02x %02x %02x %02x %02x %02x)",
+                 data[0], data[1], data[2], data[3], data[4], data[5], data[6]);
+        return false;
+    }
+
+    int sec  = bcd2dec(data[0] & 0x7F);
+    int min  = bcd2dec(data[1] & 0x7F);
+    int hour = bcd2dec(data[2] & 0x3F);
+    int mday = bcd2dec(data[3] & 0x3F);
+    int mon  = bcd2dec(data[5] & 0x1F);   /* 1-based, pre-decrement */
+    int year = bcd2dec(data[6]);           /* 0-99 → add 100 for tm_year */
+
+    /* Validate decoded fields before trusting them.  Out-of-range values
+     * indicate a corrupt or uninitialised RTC rather than a BCD glitch. */
+    if (sec  > 59 || min  > 59 || hour > 23 ||
+        mday < 1  || mday > 31 || mon  < 1  || mon > 12) {
+        ESP_LOGW(TAG, "RTC decoded out-of-range (%02d:%02d:%02d %02d/%02d/%04d) — ignoring",
+                 hour, min, sec, mday, mon, 2000 + year);
+        return false;
+    }
+
+    t->tm_sec  = sec;
+    t->tm_min  = min;
+    t->tm_hour = hour;
+    t->tm_mday = mday;
     t->tm_wday = bcd2dec(data[4] & 0x07);
-    t->tm_mon  = bcd2dec(data[5] & 0x1F) - 1;
-    t->tm_year = bcd2dec(data[6]) + 100;  /* PCF8563 year 0-99 → 2000-2099 */
+    t->tm_mon  = mon - 1;                  /* struct tm months are 0-based */
+    t->tm_year = year + 100;               /* PCF8563 year 0-99 → 2000-2099 */
+    t->tm_isdst = -1;                      /* let mktime determine DST */
+
+    ESP_LOGD(TAG, "RTC read: %04d-%02d-%02d %02d:%02d:%02d",
+             t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
+             t->tm_hour, t->tm_min, t->tm_sec);
     return true;
 }
 
