@@ -69,6 +69,11 @@ void display_timer_reset(void);
  *  Safe to call from any task; uses an internal mutex. */
 void display_timer_toggle(void);
 
+/** Invalidate the album image cache.  Call after adding or removing files
+ *  under /spiffs/images/album/ so the display task re-scans the directory
+ *  on its next render cycle. */
+void display_album_invalidate(void);
+
 #ifdef __cplusplus
 }
 #endif

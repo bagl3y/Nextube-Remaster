@@ -59,7 +59,11 @@ bool sht30_init(void)
         return false;
     }
 
-    s_mutex   = xSemaphoreCreateMutex();
+    s_mutex = xSemaphoreCreateMutex();
+    if (!s_mutex) {
+        ESP_LOGE(TAG, "Failed to create mutex — sensor disabled");
+        return false;
+    }
     s_present = true;
     ESP_LOGI(TAG, "SHT30 found at 0x%02X", SHT30_I2C_ADDR);
     return true;
@@ -136,5 +140,13 @@ void sht30_task_start(void)
 
 const sht30_reading_t *sht30_get(void)
 {
-    return &s_last;
+    static sht30_reading_t copy;
+    if (s_mutex) {
+        xSemaphoreTake(s_mutex, portMAX_DELAY);
+        copy = s_last;
+        xSemaphoreGive(s_mutex);
+    } else {
+        copy = s_last;
+    }
+    return &copy;
 }

@@ -5,11 +5,13 @@
 #include "cJSON.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include <string.h>
 #include "esp_crt_bundle.h"
 
 static const char *TAG = "yt_bili";
-static sub_count_t s_sub = {0};
+static sub_count_t       s_sub       = {0};
+static SemaphoreHandle_t s_sub_mutex = NULL;
 
 static char s_http_buf[2048];
 static int s_http_buf_len = 0;
@@ -50,8 +52,13 @@ static void fetch_youtube(void)
             if (cJSON_IsArray(items) && cJSON_GetArraySize(items) > 0) {
                 cJSON *stats = cJSON_GetObjectItem(cJSON_GetArrayItem(items, 0), "statistics");
                 cJSON *sc = cJSON_GetObjectItem(stats, "subscriberCount");
-                if (sc && sc->valuestring) s_sub.subscriber_count = atoi(sc->valuestring);
-                s_sub.valid = true;
+                if (sc && sc->valuestring) {
+                    uint32_t count = (uint32_t)atoi(sc->valuestring);
+                    xSemaphoreTake(s_sub_mutex, portMAX_DELAY);
+                    s_sub.subscriber_count = count;
+                    s_sub.valid = true;
+                    xSemaphoreGive(s_sub_mutex);
+                }
             }
             cJSON_Delete(root);
         }
@@ -83,7 +90,12 @@ static void fetch_bilibili(void)
             cJSON *data = cJSON_GetObjectItem(root, "data");
             cJSON *card = cJSON_GetObjectItem(data, "card");
             cJSON *fans = cJSON_GetObjectItem(card, "fans");
-            if (fans) { s_sub.subscriber_count = fans->valueint; s_sub.valid = true; }
+            if (fans) {
+                xSemaphoreTake(s_sub_mutex, portMAX_DELAY);
+                s_sub.subscriber_count = (uint32_t)fans->valueint;
+                s_sub.valid = true;
+                xSemaphoreGive(s_sub_mutex);
+            }
             cJSON_Delete(root);
         }
     }
@@ -101,14 +113,28 @@ static void yt_bili_task(void *arg)
         if (configured) {
             if (is_bili) fetch_bilibili();
             else         fetch_youtube();
-            ESP_LOGI(TAG, "Subscriber count: %lu (valid=%d)",
-                     (unsigned long)s_sub.subscriber_count, s_sub.valid);
         } else {
             ESP_LOGD(TAG, "Not configured — skipping fetch");
         }
-        vTaskDelay(pdMS_TO_TICKS(300000));  /* Every 5 minutes */
+        vTaskDelay(pdMS_TO_TICKS(1800000)); /* Every 30 minutes */
     }
 }
 
-void youtube_bili_start(void) { xTaskCreate(yt_bili_task, "yt_bili", 8192, NULL, 3, NULL); }
-const sub_count_t *youtube_bili_get(void) { return &s_sub; }
+void youtube_bili_start(void)
+{
+    s_sub_mutex = xSemaphoreCreateMutex();
+    xTaskCreate(yt_bili_task, "yt_bili", 8192, NULL, 3, NULL);
+}
+
+const sub_count_t *youtube_bili_get(void)
+{
+    static sub_count_t copy;
+    if (s_sub_mutex) {
+        xSemaphoreTake(s_sub_mutex, portMAX_DELAY);
+        copy = s_sub;
+        xSemaphoreGive(s_sub_mutex);
+    } else {
+        copy = s_sub;
+    }
+    return &copy;
+}

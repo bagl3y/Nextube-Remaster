@@ -639,14 +639,22 @@ static void weather_task(void *arg)
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 
-    /* First fetch: attempt immediately, then retry every 5 s until it succeeds.
-     * No blanket settling delay — fetch_weather() is resilient to failure
-     * (http_get returns NULL on any error) so a failed attempt is harmless. */
+    /* First fetch: attempt immediately, then retry with exponential backoff
+     * (5 s → 10 s → 20 s → … capped at 5 min) until it succeeds.
+     * If weather is not configured (empty city, no API key) the fetch
+     * functions return immediately without setting s_weather.valid;
+     * the backoff prevents spinning at 5 s forever in that case. */
     ESP_LOGI(TAG, "WiFi ready – fetching weather");
+    uint32_t retry_ms = 5000;
     while (!s_weather.valid) {
         fetch_weather();
-        if (!s_weather.valid)
-            vTaskDelay(pdMS_TO_TICKS(5000));   /* retry in 5 s if fetch failed */
+        if (!s_weather.valid) {
+            ESP_LOGW(TAG, "Weather fetch failed, retrying in %lu s",
+                     (unsigned long)(retry_ms / 1000));
+            vTaskDelay(pdMS_TO_TICKS(retry_ms));
+            if (retry_ms < 300000)
+                retry_ms = (retry_ms * 2 < 300000) ? retry_ms * 2 : 300000;
+        }
     }
 
     /* Subsequent fetches every 10 minutes */

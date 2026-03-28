@@ -185,10 +185,10 @@ static void apply_volume(uint8_t *buf, int len_bytes,
         int16_t *s = (int16_t *)(void *)buf;
         int      n = len_bytes / 2;
         for (int i = 0; i < n; i++)
-            s[i] = (int16_t)((float)s[i] * scale);
+            s[i] = (int16_t)roundf((float)s[i] * scale);
     } else {
         for (int i = 0; i < len_bytes; i++)
-            buf[i] = (uint8_t)(128 + (int)(((int)buf[i] - 128) * scale));
+            buf[i] = (uint8_t)(128 + (int)roundf(((int)buf[i] - 128) * scale));
     }
 }
 
@@ -567,7 +567,9 @@ void audio_stop(void)
     /* Poll briefly for playback task to finish (it gives the mutex on exit) */
     for (int i = 0; i < 30 && s_audio_task != NULL; i++)
         vTaskDelay(pdMS_TO_TICKS(10));
-    /* Guarantee idle state on DAC output */
-    if (s_dac_one)
+    /* Only touch DAC state if the task exited cleanly.  If it timed out, it
+     * is still tearing down the DAC hardware and owns the oneshot handle;
+     * touching it concurrently would race with dac_cont_stop(). */
+    if (s_audio_task == NULL && s_dac_one)
         dac_oneshot_output_voltage(s_dac_one, 0);
 }

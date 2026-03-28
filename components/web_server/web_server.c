@@ -277,7 +277,7 @@ static esp_err_t api_ota(httpd_req_t *r)
         return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA begin fail"), ESP_FAIL;
 
     char *buf = malloc(4096);
-    if (!buf) return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL;
+    if (!buf) { esp_ota_abort(h); return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL; }
     int rem = r->content_len;
     bool first_chunk = true;
 
@@ -593,10 +593,10 @@ static esp_err_t api_file_download(httpd_req_t *r)
     char clen[24]; snprintf(clen, sizeof(clen), "%ld", sz);
     httpd_resp_set_hdr(r, "Content-Length", clen);
 
-    char *buf = malloc(2048);
+    char *buf = malloc(8192);
     if (!buf) { fclose(f); return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL; }
     size_t rd;
-    while ((rd = fread(buf, 1, 2048, f)) > 0)
+    while ((rd = fread(buf, 1, 8192, f)) > 0)
         httpd_resp_send_chunk(r, buf, rd);
     httpd_resp_send_chunk(r, NULL, 0);
     free(buf); fclose(f);
@@ -628,10 +628,10 @@ static esp_err_t api_file_upload(httpd_req_t *r)
         return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "Cannot create file"), ESP_FAIL;
     }
 
-    char *buf = malloc(2048);
+    char *buf = malloc(8192);
     if (!buf) { fclose(f); return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"), ESP_FAIL; }
     int received = 0, n;
-    while ((n = httpd_req_recv(r, buf, 2048)) > 0) {
+    while ((n = httpd_req_recv(r, buf, 8192)) > 0) {
         fwrite(buf, 1, n, f);
         received += n;
     }
@@ -639,6 +639,8 @@ static esp_err_t api_file_upload(httpd_req_t *r)
 
     if (n < 0) { remove(spiffs_path); return ESP_FAIL; }
     ESP_LOGI(TAG, "Uploaded: %s (%d bytes)", spiffs_path, received);
+    if (strncmp(p, "/images/album/", 14) == 0)
+        display_album_invalidate();
     return send_json(r, "{\"status\":\"ok\"}");
 }
 
@@ -660,6 +662,8 @@ static esp_err_t api_file_delete(httpd_req_t *r)
     if (remove(spiffs_path) != 0)
         return httpd_resp_send_err(r, HTTPD_404_NOT_FOUND, "Not found"), ESP_FAIL;
     ESP_LOGI(TAG, "Deleted: %s", spiffs_path);
+    if (strncmp(p, "/images/album/", 14) == 0)
+        display_album_invalidate();
     return send_json(r, "{\"status\":\"ok\"}");
 }
 

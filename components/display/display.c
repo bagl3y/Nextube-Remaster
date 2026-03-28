@@ -98,6 +98,14 @@ void display_init(void)
     gpio_set_level(PIN_LCD_RST, 0); vTaskDelay(pdMS_TO_TICKS(50));
     gpio_set_level(PIN_LCD_RST, 1); vTaskDelay(pdMS_TO_TICKS(120));
     for (int i = 0; i < LCD_COUNT; i++) { st7735_init_one(i); display_fill(i, 0x0000); }
+
+    /* Pre-allocate shared PSRAM buffers used by the image cache and flip
+     * animation.  Doing this once at init avoids per-decode malloc churn. */
+    s_jpeg_work_buf  = PSRAM_MALLOC(JPEG_WORK_BUF_SIZE);
+    s_flip_frame_buf = PSRAM_MALLOC(FLIP_FRAME_BYTES);
+    if (!s_jpeg_work_buf || !s_flip_frame_buf)
+        ESP_LOGW(TAG, "Failed to pre-allocate decode buffers — performance degraded");
+
     ESP_LOGI(TAG, "Displays ready");
 }
 
@@ -168,14 +176,75 @@ static void flip_to_image(int tube, const uint8_t *new_buf, const char *path);
 /* TJpgDec workspace: ~3100 bytes for JD_FASTDECODE=0 – round up with margin. */
 #define JPEG_WORK_BUF_SIZE  3200
 
-/* ── JPEG decode helper ─────────────────────────────────────────────────
- * Load + decode one JPEG from SPIFFS into a PSRAM RGB565 buffer.
- * Writes decoded width/height into *w_out / *h_out (may be NULL).
- * Returns a heap-allocated PSRAM buffer the caller must free(), or NULL
- * on any error (file missing, OOM, decode failure). */
-static uint8_t *jpeg_decode_psram(const char *path, int *w_out, int *h_out)
+/* ── Image decode cache ─────────────────────────────────────────────────
+ * LRU cache of decoded RGB565 frames in PSRAM.  Eliminates re-reading from
+ * SPIFFS and re-decoding JPEG for images that have not changed since the
+ * previous render tick (e.g. clock digits that stay the same, weather icon).
+ *
+ * Each slot permanently owns a 25 600-byte PSRAM output buffer — no malloc
+ * on cache hit, no fragmentation from eviction.  Total PSRAM for the cache:
+ *   IMG_CACHE_ENTRIES × 25 600 B = 512 KB  (affordable on 8 MB PSRAM)
+ *
+ * Access is single-threaded (display task only) so no mutex is needed. */
+#define IMG_CACHE_ENTRIES  20
+#define IMG_CACHE_PATH_MAX 320
+
+typedef struct {
+    char     path[IMG_CACHE_PATH_MAX]; /* SPIFFS path key (no "/spiffs" prefix) */
+    uint8_t *data;      /* permanently owned PSRAM RGB565 buffer, or NULL       */
+    int      w, h;      /* decoded image dimensions                              */
+    uint32_t used_at;   /* monotonic stamp; higher = more recently used         */
+} img_cache_entry_t;
+
+static img_cache_entry_t s_img_cache[IMG_CACHE_ENTRIES]; /* zero-init at startup */
+static uint32_t          s_cache_clock = 0;
+
+/* Pre-allocated buffers reused across every JPEG decode (avoids per-call
+ * malloc/free churn on the PSRAM allocator). */
+static uint8_t *s_jpeg_work_buf  = NULL;   /* JPEG_WORK_BUF_SIZE bytes (PSRAM) */
+static uint8_t *s_flip_frame_buf = NULL;   /* FLIP_FRAME_BYTES bytes (PSRAM)   */
+
+/* Evict all cache entries (called on theme change so stale paths age out). */
+static void img_cache_flush(void)
 {
-    char full[320];
+    for (int i = 0; i < IMG_CACHE_ENTRIES; i++) {
+        s_img_cache[i].path[0] = '\0';
+        s_img_cache[i].used_at = 0;
+        /* Retain the data allocation — it will be overwritten on next use. */
+    }
+    s_cache_clock = 0;
+    ESP_LOGI(TAG, "Image cache flushed");
+}
+
+/* ── img_cache_get ──────────────────────────────────────────────────────
+ * Return a pointer to the decoded RGB565 frame for `path`.
+ * On cache hit : stamp the entry as most-recently used and return immediately.
+ * On cache miss: decode from SPIFFS into the LRU slot and return the pointer.
+ * Returns NULL on decode failure; caller should display_fill(tube, 0x0000).
+ * The returned pointer is valid until the next img_cache_flush() call or
+ * until the same slot is evicted.  Callers must NOT free() the pointer. */
+static const uint8_t *img_cache_get(const char *path, int *w_out, int *h_out)
+{
+    /* ── Cache lookup ── */
+    for (int i = 0; i < IMG_CACHE_ENTRIES; i++) {
+        if (s_img_cache[i].data &&
+            strncmp(s_img_cache[i].path, path, IMG_CACHE_PATH_MAX - 1) == 0) {
+            s_img_cache[i].used_at = ++s_cache_clock;
+            if (w_out) *w_out = s_img_cache[i].w;
+            if (h_out) *h_out = s_img_cache[i].h;
+            return s_img_cache[i].data;
+        }
+    }
+
+    /* ── Cache miss: choose slot (prefer empty, then LRU) ── */
+    int slot = 0;
+    for (int i = 0; i < IMG_CACHE_ENTRIES; i++) {
+        if (!s_img_cache[i].data) { slot = i; break; }
+        if (s_img_cache[i].used_at < s_img_cache[slot].used_at) slot = i;
+    }
+
+    /* ── Decode from SPIFFS ── */
+    char full[IMG_CACHE_PATH_MAX + 7];
     snprintf(full, sizeof(full), "/spiffs%s", path);
     FILE *f = fopen(full, "rb");
     if (!f) { ESP_LOGW(TAG, "Image not found: %s", full); return NULL; }
@@ -190,38 +259,46 @@ static uint8_t *jpeg_decode_psram(const char *path, int *w_out, int *h_out)
     fread(jpeg_buf, 1, sz, f);
     fclose(f);
 
-    uint8_t *work_buf = PSRAM_MALLOC(JPEG_WORK_BUF_SIZE);
-    size_t   out_sz   = LCD_WIDTH * LCD_HEIGHT * 2;
-    uint8_t *rgb_buf  = PSRAM_MALLOC(out_sz);
-
-    if (!work_buf || !rgb_buf) {
-        free(work_buf); free(rgb_buf); free(jpeg_buf); return NULL;
+    /* Allocate output buffer on first use of this slot (kept forever). */
+    if (!s_img_cache[slot].data) {
+        s_img_cache[slot].data = PSRAM_MALLOC(LCD_WIDTH * LCD_HEIGHT * 2);
+        if (!s_img_cache[slot].data) { free(jpeg_buf); return NULL; }
     }
+
+    /* Ensure the work buffer is available (pre-allocated at init; lazy fallback). */
+    if (!s_jpeg_work_buf)
+        s_jpeg_work_buf = PSRAM_MALLOC(JPEG_WORK_BUF_SIZE);
+    if (!s_jpeg_work_buf) { free(jpeg_buf); return NULL; }
 
     esp_jpeg_image_cfg_t dec_cfg = {0};
     dec_cfg.indata                       = jpeg_buf;
     dec_cfg.indata_size                  = (uint32_t)sz;
-    dec_cfg.outbuf                       = rgb_buf;
-    dec_cfg.outbuf_size                  = out_sz;
+    dec_cfg.outbuf                       = s_img_cache[slot].data;
+    dec_cfg.outbuf_size                  = LCD_WIDTH * LCD_HEIGHT * 2;
     dec_cfg.out_format                   = JPEG_IMAGE_FORMAT_RGB565;
     dec_cfg.out_scale                    = JPEG_IMAGE_SCALE_0;
     dec_cfg.flags.swap_color_bytes       = 1;   /* big-endian bytes for ST7735 */
-    dec_cfg.advanced.working_buffer      = work_buf;
+    dec_cfg.advanced.working_buffer      = s_jpeg_work_buf;
     dec_cfg.advanced.working_buffer_size = JPEG_WORK_BUF_SIZE;
 
     esp_jpeg_image_output_t out_img = {0};
     esp_err_t err = esp_jpeg_decode(&dec_cfg, &out_img);
-
-    free(work_buf);
     free(jpeg_buf);
 
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "JPEG decode failed %d: %s", err, full);
-        free(rgb_buf); return NULL;
+        s_img_cache[slot].path[0] = '\0';   /* slot data is allocated but invalid */
+        return NULL;
     }
-    if (w_out) *w_out = (int)out_img.width;
-    if (h_out) *h_out = (int)out_img.height;
-    return rgb_buf;
+
+    strncpy(s_img_cache[slot].path, path, IMG_CACHE_PATH_MAX - 1);
+    s_img_cache[slot].path[IMG_CACHE_PATH_MAX - 1] = '\0';
+    s_img_cache[slot].w       = (int)out_img.width;
+    s_img_cache[slot].h       = (int)out_img.height;
+    s_img_cache[slot].used_at = ++s_cache_clock;
+    if (w_out) *w_out = s_img_cache[slot].w;
+    if (h_out) *h_out = s_img_cache[slot].h;
+    return s_img_cache[slot].data;
 }
 
 void display_show_image(int tube, const char *path)
@@ -229,7 +306,7 @@ void display_show_image(int tube, const char *path)
     if (tube < 0 || tube >= LCD_COUNT || !path) return;
 
     int w = 0, h = 0;
-    uint8_t *rgb_buf = jpeg_decode_psram(path, &w, &h);
+    const uint8_t *rgb_buf = img_cache_get(path, &w, &h);
     if (!rgb_buf) { display_fill(tube, 0x0000); return; }
 
     /* Push RGB565 frame to LCD (with FlipClock animation) */
@@ -239,83 +316,9 @@ void display_show_image(int tube, const char *path)
     } else {
         display_show_digit(tube, rgb_buf, w, h);
     }
-    free(rgb_buf);
+    /* Cache owns the buffer — no free() here */
 }
 
-/* ── Blended image display ──────────────────────────────────────────────
- * Decode base_path (LCD_WIDTH × LCD_HEIGHT) and overlay_path (any size),
- * composite them with a diff-key blend, then push the result to the tube.
- * Used to show a degree symbol (Temperature/degreec.jpg or degreef.jpg)
- * correctly on top of the theme's blank tube background (AMPM/blank.jpg).
- *
- * Diff-key blend algorithm:
- *   For each pixel in the overlay (centered on base):
- *     diff = |overlay_byte0 - base_byte0| + |overlay_byte1 - base_byte1|
- *     if diff > BLEND_DIFF_THRESH  →  use overlay pixel  (symbol colour)
- *     else                         →  keep base pixel    (blank background)
- *
- * This is theme-agnostic: it detects the symbol by how much it differs
- * from what the blank background looks like at that exact position, so it
- * works for both dark-background themes (NixieOY amber) and bright ones.
- * JPEG compression artifacts (±5 levels) stay below the threshold.
- *
- * Falls back gracefully: if overlay decode fails, shows base alone;
- * if base also fails, fills black. */
-#define BLEND_DIFF_THRESH 28   /* ~11 levels per byte; above JPEG noise floor */
-
-static void display_show_image_blended(int tube,
-                                        const char *base_path,
-                                        const char *overlay_path)
-{
-    if (tube < 0 || tube >= LCD_COUNT) return;
-
-    int bw = 0, bh = 0;
-    uint8_t *base = jpeg_decode_psram(base_path, &bw, &bh);
-    if (!base) { display_fill(tube, 0x0000); return; }
-
-    if (bw != LCD_WIDTH || bh != LCD_HEIGHT) {
-        /* Unexpected base size — show base as-is */
-        display_show_digit(tube, base, bw, bh);
-        free(base);
-        return;
-    }
-
-    int ow = 0, oh = 0;
-    uint8_t *overlay = jpeg_decode_psram(overlay_path, &ow, &oh);
-    if (overlay) {
-        /* Center overlay on base (handles both small sprites and full-tube images) */
-        int start_x = (LCD_WIDTH  - ow) / 2;
-        int start_y = (LCD_HEIGHT - oh) / 2;
-        if (start_x < 0) start_x = 0;
-        if (start_y < 0) start_y = 0;
-
-        for (int y = 0; y < oh; y++) {
-            int dest_y = start_y + y;
-            if (dest_y >= LCD_HEIGHT) continue;
-            for (int x = 0; x < ow; x++) {
-                int dest_x = start_x + x;
-                if (dest_x >= LCD_WIDTH) continue;
-
-                int src_idx = (y  * ow         + x)      * 2;
-                int dst_idx = (dest_y * LCD_WIDTH + dest_x) * 2;
-
-                /* Diff-key: use overlay where it meaningfully differs from
-                 * blank at this position (symbol pixels), keep blank where
-                 * the overlay background matches (background pixels). */
-                int diff = abs((int)overlay[src_idx]     - (int)base[dst_idx])
-                         + abs((int)overlay[src_idx + 1] - (int)base[dst_idx + 1]);
-                if (diff > BLEND_DIFF_THRESH) {
-                    base[dst_idx]     = overlay[src_idx];
-                    base[dst_idx + 1] = overlay[src_idx + 1];
-                }
-            }
-        }
-        free(overlay);
-    }
-
-    display_show_digit(tube, base, LCD_WIDTH, LCD_HEIGHT);
-    free(base);
-}
 /* ════════════════════════════════════════════════════════════════════
  *  FlipClock split-flap animation
  *
@@ -421,26 +424,22 @@ static void flip_to_image(int tube, const uint8_t *new_buf, const char *path)
                                  s_flip_path[tube],
                                  sizeof(s_flip_path[tube]) - 1) != 0);
 
-    if (path_changed && s_flip_prev[tube] != NULL) {
-        /* Allocate a temporary working frame in PSRAM */
-        uint8_t *frame = PSRAM_MALLOC(FLIP_FRAME_BYTES);
-        if (frame) {
-            for (int step = 0; step < FLIP_STEPS; step++) {
-                flip_build_frame(frame, s_flip_prev[tube], new_buf, step);
-                /* display_show_digit() SPI transmission (~8 ms) naturally
-                 * paces the animation — no extra vTaskDelay() needed. */
-                display_show_digit(tube, frame, LCD_WIDTH, LCD_HEIGHT);
-            }
-            free(frame);
+    if (path_changed && s_flip_prev[tube] != NULL && s_flip_frame_buf != NULL) {
+        /* Use the pre-allocated shared frame buffer — no per-animation malloc. */
+        for (int step = 0; step < FLIP_STEPS; step++) {
+            flip_build_frame(s_flip_frame_buf, s_flip_prev[tube], new_buf, step);
+            /* display_show_digit() SPI transmission (~8 ms) naturally
+             * paces the animation — no extra vTaskDelay() needed. */
+            display_show_digit(tube, s_flip_frame_buf, LCD_WIDTH, LCD_HEIGHT);
         }
-        /* If frame alloc failed: animation silently skipped; final frame
-         * pushed below so the tube still shows the correct image. */
     }
+    /* If s_flip_frame_buf is NULL (pre-alloc failed): animation skipped;
+     * final frame pushed below so the tube still shows the correct image. */
 
     /* Always push the final (complete) new frame */
     display_show_digit(tube, new_buf, LCD_WIDTH, LCD_HEIGHT);
 
-    /* Update per-tube cache -------------------------------------------- */
+    /* Update per-tube previous-frame cache */
     if (!s_flip_prev[tube])
         s_flip_prev[tube] = PSRAM_MALLOC(FLIP_FRAME_BYTES);
     if (s_flip_prev[tube])
@@ -476,58 +475,22 @@ static void flip_prime_blank(int tube, const char *theme)
 
     /* Skip if the cache already holds blank or a degree image —
      * animating from blank→blank or degree→degree looks wrong. */
-    if (strstr(s_flip_path[tube], "/AMPM/blank.jpg")      != NULL) return;
-    if (strstr(s_flip_path[tube], "/Temperature/degree")  != NULL) return;
+    if (strstr(s_flip_path[tube], "/AMPM/blank.jpg")     != NULL) return;
+    if (strstr(s_flip_path[tube], "/Temperature/degree") != NULL) return;
 
-    /* ── Decode blank.jpg → PSRAM and store as the previous frame ── */
-    char full[328];   /* 320 (blank_path max) + 7 ("/spiffs") + 1 (NUL) */
-    snprintf(full, sizeof(full), "/spiffs%s", blank_path);
-    FILE *f = fopen(full, "rb");
-    if (!f) return;
+    /* Fetch blank.jpg via the image cache — free decode if it's cached. */
+    int w = 0, h = 0;
+    const uint8_t *frame = img_cache_get(blank_path, &w, &h);
+    if (!frame || w != LCD_WIDTH || h != LCD_HEIGHT) return;
 
-    fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
-    if (sz <= 0 || sz > 200000) { fclose(f); return; }
-
-    uint8_t *jpeg_buf = PSRAM_MALLOC(sz);
-    if (!jpeg_buf) { fclose(f); return; }
-    fread(jpeg_buf, 1, sz, f);
-    fclose(f);
-
-    uint8_t *work_buf = PSRAM_MALLOC(JPEG_WORK_BUF_SIZE);
-    uint8_t *rgb_buf  = PSRAM_MALLOC(FLIP_FRAME_BYTES);
-    if (!work_buf || !rgb_buf) {
-        free(work_buf); free(rgb_buf); free(jpeg_buf); return;
-    }
-
-    esp_jpeg_image_cfg_t dec_cfg = {0};
-    dec_cfg.indata                       = jpeg_buf;
-    dec_cfg.indata_size                  = (uint32_t)sz;
-    dec_cfg.outbuf                       = rgb_buf;
-    dec_cfg.outbuf_size                  = FLIP_FRAME_BYTES;
-    dec_cfg.out_format                   = JPEG_IMAGE_FORMAT_RGB565;
-    dec_cfg.out_scale                    = JPEG_IMAGE_SCALE_0;
-    dec_cfg.flags.swap_color_bytes       = 1;
-    dec_cfg.advanced.working_buffer      = work_buf;
-    dec_cfg.advanced.working_buffer_size = JPEG_WORK_BUF_SIZE;
-
-    esp_jpeg_image_output_t out_img = {0};
-    esp_err_t err = esp_jpeg_decode(&dec_cfg, &out_img);
-
-    free(work_buf);
-    free(jpeg_buf);
-
-    if (err == ESP_OK &&
-        (int)out_img.width == LCD_WIDTH && (int)out_img.height == LCD_HEIGHT) {
-        /* Store decoded blank frame as the "previous" for this tube */
-        if (!s_flip_prev[tube])
-            s_flip_prev[tube] = PSRAM_MALLOC(FLIP_FRAME_BYTES);
-        if (s_flip_prev[tube])
-            memcpy(s_flip_prev[tube], rgb_buf, FLIP_FRAME_BYTES);
+    /* Copy into the per-tube previous-frame buffer for the flip animation. */
+    if (!s_flip_prev[tube])
+        s_flip_prev[tube] = PSRAM_MALLOC(FLIP_FRAME_BYTES);
+    if (s_flip_prev[tube]) {
+        memcpy(s_flip_prev[tube], frame, FLIP_FRAME_BYTES);
         strncpy(s_flip_path[tube], blank_path, sizeof(s_flip_path[tube]) - 1);
         s_flip_path[tube][sizeof(s_flip_path[tube]) - 1] = '\0';
     }
-
-    free(rgb_buf);
 }
 
 /* ── Path builders ─────────────────────────────────────────────────── */
@@ -748,6 +711,12 @@ static int  s_album_count  = 0;
 static int  s_album_index  = 0;
 static bool s_album_loaded = false;
 
+void display_album_invalidate(void)
+{
+    s_album_loaded = false;
+    s_album_index  = 0;
+}
+
 static void album_load_list(void)
 {
     if (s_album_loaded) return;
@@ -854,9 +823,6 @@ static void render_weather(const nextube_config_t *cfg, int panel)
     /* ── Panel 1: humidity ─────────────────────────────────────────── */
     /* Layout: 0=blank  1=blank  2=tens/blank  3=units  4=%  5=icon */
     if (panel == 1) {
-        char blank_path[256];
-        display_path_ampm(blank_path, sizeof(blank_path), cfg->theme, "blank");
-
         display_show_ampm(0, "blank", cfg->theme);
         display_show_ampm(1, "blank", cfg->theme);
 
@@ -872,9 +838,9 @@ static void render_weather(const nextube_config_t *cfg, int panel)
         display_path_number(path, sizeof(path), cfg->theme, hum % 10);
         display_show_image(3, path);
 
-        /* Tube 4: % symbol — diff-key composite over blank */
+        /* Tube 4: humidity % symbol (full 80×160 image) */
         display_path_humidity(path, sizeof(path), cfg->theme, "humidity");
-        display_show_image_blended(4, blank_path, path);
+        display_show_image(4, path);
 
         return;
     }
@@ -886,16 +852,11 @@ static void render_weather(const nextube_config_t *cfg, int panel)
      *   negative 1-digit :  [blank] [blank] [minus] [units] [°C/°F] [icon]
      *   negative 2-digit :  [blank] [minus] [tens]  [units] [°C/°F] [icon]
      *
-     * minus.jpg and degreec/f.jpg are small sprites composited over blank.jpg
-     * via diff-key blend so the tube background shows correctly for every theme.
-     * blank_path is built once and shared by all blended calls. */
+     * minus.jpg, degreec.jpg, and degreef.jpg are full 80×160 images —
+     * displayed directly without blending. */
 
     /* Prime flip animation cache — degree symbol is always on tube 4 */
     flip_prime_blank(4, cfg->theme);
-
-    /* Build blank path once — reused for minus and °C/°F blended composites */
-    char blank_path[256];
-    display_path_ampm(blank_path, sizeof(blank_path), cfg->theme, "blank");
 
     bool single_digit = (temp < 10);
 
@@ -905,7 +866,7 @@ static void render_weather(const nextube_config_t *cfg, int panel)
     /* Tube 1: minus (2-digit negative) or blank */
     if (negative && !single_digit) {
         display_path_temperature(path, sizeof(path), cfg->theme, "minus");
-        display_show_image_blended(1, blank_path, path);
+        display_show_image(1, path);
     } else {
         display_show_ampm(1, "blank", cfg->theme);
     }
@@ -913,7 +874,7 @@ static void render_weather(const nextube_config_t *cfg, int panel)
     /* Tube 2: minus (1-digit negative), tens digit (2-digit), or blank */
     if (negative && single_digit) {
         display_path_temperature(path, sizeof(path), cfg->theme, "minus");
-        display_show_image_blended(2, blank_path, path);
+        display_show_image(2, path);
     } else if (!single_digit) {
         display_path_number(path, sizeof(path), cfg->theme, temp / 10);
         display_show_image(2, path);
@@ -925,9 +886,9 @@ static void render_weather(const nextube_config_t *cfg, int panel)
     display_path_number(path, sizeof(path), cfg->theme, temp % 10);
     display_show_image(3, path);
 
-    /* Tube 4: °C / °F — diff-key composite over blank */
+    /* Tube 4: °C / °F symbol (full 80×160 image) */
     display_path_temperature(path, sizeof(path), cfg->theme, unit);
-    display_show_image_blended(4, blank_path, path);
+    display_show_image(4, path);
 }
 
 /* ── Timer state ────────────────────────────────────────────────────── */
@@ -1016,6 +977,9 @@ static void display_task(void *arg)
                 rotation_tick = xTaskGetTickCount();
             }
         }
+
+        if (theme_changed)
+            img_cache_flush();   /* evict stale paths from the old theme */
 
         if (mode_changed || theme_changed || first) {
             /* Reset album, timer, and weather panel state on mode/theme switch */

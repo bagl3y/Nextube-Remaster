@@ -106,9 +106,9 @@ static void json_read_u16(cJSON *root, const char *key, uint16_t *dst)
     *dst = (uint16_t)v;
 }
 
-static void parse_json(const char *json)
+static void parse_json(const char *json, size_t len)
 {
-    cJSON *root = cJSON_Parse(json);
+    cJSON *root = cJSON_ParseWithLength(json, len);
     if (!root) {
         ESP_LOGW(TAG, "JSON parse failed, keeping defaults");
         return;
@@ -269,7 +269,7 @@ static bool load_from_flash(void)
     buf[sz] = '\0';
     fclose(f);
 
-    parse_json(buf);
+    parse_json(buf, (size_t)sz);
     free(buf);
     ESP_LOGI(TAG, "Config loaded from flash");
     return true;
@@ -312,7 +312,7 @@ bool config_set_json(const char *json, size_t len)
 {
     if (!json || len == 0) return false;
     xSemaphoreTakeRecursive(s_mutex, portMAX_DELAY);
-    parse_json(json);
+    parse_json(json, len);
     save_to_flash();
     xSemaphoreGiveRecursive(s_mutex);
     return true;
