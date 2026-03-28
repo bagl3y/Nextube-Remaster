@@ -98,14 +98,6 @@ void display_init(void)
     gpio_set_level(PIN_LCD_RST, 0); vTaskDelay(pdMS_TO_TICKS(50));
     gpio_set_level(PIN_LCD_RST, 1); vTaskDelay(pdMS_TO_TICKS(120));
     for (int i = 0; i < LCD_COUNT; i++) { st7735_init_one(i); display_fill(i, 0x0000); }
-
-    /* Pre-allocate shared PSRAM buffers used by the image cache and flip
-     * animation.  Doing this once at init avoids per-decode malloc churn. */
-    s_jpeg_work_buf  = PSRAM_MALLOC(JPEG_WORK_BUF_SIZE);
-    s_flip_frame_buf = PSRAM_MALLOC(FLIP_FRAME_BYTES);
-    if (!s_jpeg_work_buf || !s_flip_frame_buf)
-        ESP_LOGW(TAG, "Failed to pre-allocate decode buffers — performance degraded");
-
     ESP_LOGI(TAG, "Displays ready");
 }
 
@@ -934,6 +926,14 @@ static void display_task(void *arg)
 {
     s_timer_mutex  = xSemaphoreCreateMutex();
     s_timer_start  = xTaskGetTickCount();
+
+    /* Pre-allocate shared PSRAM buffers used by the image cache and flip
+     * animation.  Doing this here (rather than in display_init) so the
+     * macros and statics are already in scope. */
+    s_jpeg_work_buf  = PSRAM_MALLOC(JPEG_WORK_BUF_SIZE);
+    s_flip_frame_buf = PSRAM_MALLOC(FLIP_FRAME_BYTES);
+    if (!s_jpeg_work_buf || !s_flip_frame_buf)
+        ESP_LOGW(TAG, "Failed to pre-allocate decode buffers — performance degraded");
 
     /* Per-render state for change detection */
     struct tm     last_t        = {0};
