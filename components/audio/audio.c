@@ -41,6 +41,7 @@
 #include <strings.h>    /* strcasecmp */
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
+#include <math.h>
 
 static const char *TAG = "audio";
 
