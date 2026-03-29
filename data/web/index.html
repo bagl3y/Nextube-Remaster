@@ -41,6 +41,8 @@ select option{background:var(--accent);color:var(--text)}
 .toast.show{opacity:1;transform:translateY(0)}
 .toast.err{background:var(--hi);color:#fff}
 .tab-content{display:none}.tab-content.active{display:block}
+#unsaved-banner{display:none;background:rgba(255,180,0,.12);border:1px solid rgba(255,180,0,.45);border-radius:8px;padding:.6rem 1rem;margin:.25rem 1rem .5rem;font-size:.83rem;align-items:center;justify-content:space-between;gap:.8rem}
+#unsaved-banner.show{display:flex}
 .wifi-item{display:flex;justify-content:space-between;padding:.4rem 0;border-bottom:1px solid rgba(255,255,255,.05)}
 .wifi-item .ssid{font-weight:500}.wifi-item .rssi{color:var(--dim);font-size:.8rem}
 .progress{height:4px;background:rgba(255,255,255,.1);border-radius:2px;overflow:hidden;margin-top:.5rem}
@@ -62,6 +64,10 @@ select option{background:var(--accent);color:var(--text)}
 <div id="ver-mismatch" style="display:none;background:rgba(233,69,96,.15);border:1px solid rgba(233,69,96,.5);border-radius:8px;padding:.65rem 1rem;margin:.5rem 1rem 0;font-size:.83rem;line-height:1.5">
   ⚠️ <strong>Web UI / Firmware version mismatch</strong> — firmware is <strong id="vm-fw"></strong> but SPIFFS web UI is <strong id="vm-sp"></strong>.
   Go to <strong>System → Web UI Update</strong> and flash the matching <code>spiffs.bin</code>.
+</div>
+<div id="unsaved-banner">
+  <span>⚠ You have unsaved changes.</span>
+  <button class="btn btn-primary" style="padding:.3rem .9rem;font-size:.8rem" onclick="saveSettings()">Save Now</button>
 </div>
 <nav id="tabs">
   <button class="active" data-tab="dashboard">Dashboard</button>
@@ -412,6 +418,21 @@ function toggleWeatherKey() {
   $('f-wkey-row').style.display = (src === 'openweather') ? '' : 'none';
 }
 
+/* ── Unsaved-changes banner ────────────────────────── */
+let dirty = false;
+let loadingSettings = false;
+function markDirty() {
+  if (loadingSettings) return;
+  dirty = true;
+  document.getElementById('unsaved-banner').classList.add('show');
+}
+function clearDirty() {
+  dirty = false;
+  document.getElementById('unsaved-banner').classList.remove('show');
+}
+document.querySelector('main').addEventListener('input',  markDirty);
+document.querySelector('main').addEventListener('change', markDirty);
+
 /* ── Tabs ──────────────────────────────────────────── */
 document.querySelectorAll('#tabs button').forEach(b => {
   b.onclick = () => {
@@ -475,6 +496,7 @@ async function loadThemes(manual) {
 
 /* ── Load settings ─────────────────────────────────── */
 async function loadSettings() {
+  loadingSettings = true;
   await loadThemes();
   cfg = await api('settings');
   if (!cfg) return;
@@ -553,6 +575,8 @@ async function loadSettings() {
     col.appendChild(d);
     sw.appendChild(col);
   });
+  loadingSettings = false;
+  clearDirty();
 }
 
 /* ── Time format change – show tube-6 option only for 24H (No Sec) ── */
@@ -618,6 +642,7 @@ async function saveSettings() {
   };
   const res = await api('settings', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
   toast(res?.status === 'ok' ? 'Settings saved!' : 'Save failed', res?.status !== 'ok');
+  if (res?.status === 'ok') clearDirty();
 }
 
 /* ── Set mode ──────────────────────────────────────── */
