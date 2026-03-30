@@ -27,8 +27,12 @@ static void set_defaults(void)
     strcpy(s_cfg.theme, "NixieOY");
     strcpy(s_cfg.time_type, "24H");
     strcpy(s_cfg.clock_tube5, "blank");
-    s_cfg.lcd_brightness  = 30;
     s_cfg.led_brightness  = 60;
+    s_cfg.lcd_brightness  = 60;
+    s_cfg.auto_brightness = false;
+    s_cfg.night_brightness = 30;
+    s_cfg.night_start_hour = 22;
+    s_cfg.night_end_hour   = 7;
     s_cfg.backlight_mode  = BL_MODE_BREATH;
     s_cfg.backlight_on    = true;
     /* All modes enabled by default. Clock and Date are independent — both
@@ -172,8 +176,15 @@ static void parse_json(const char *json, size_t len)
     }
 
     json_read_u8(root, "volume",         &s_cfg.volume);
-    json_read_u8(root, "lcd_brightness", &s_cfg.lcd_brightness);
     json_read_u8(root, "led_brightness", &s_cfg.led_brightness);
+    json_read_u8(root, "lcd_brightness", &s_cfg.lcd_brightness);
+    {
+        cJSON *ab = cJSON_GetObjectItem(root, "auto_brightness");
+        if (cJSON_IsBool(ab)) s_cfg.auto_brightness = cJSON_IsTrue(ab);
+    }
+    json_read_u8(root, "night_brightness", &s_cfg.night_brightness);
+    json_read_u8(root, "night_start_hour", &s_cfg.night_start_hour);
+    json_read_u8(root, "night_end_hour",   &s_cfg.night_end_hour);
 
     json_read_u16(root, "default_countdown_time", &s_cfg.countdown_minutes);
     json_read_u16(root, "pomodoro_work",          &s_cfg.pomodoro_work);
@@ -357,8 +368,12 @@ char *config_to_json(void)
     cJSON_AddStringToObject(root, "hostname",        s_cfg.hostname);
     cJSON_AddBoolToObject  (root, "button_sound",     s_cfg.button_sound);
     cJSON_AddNumberToObject(root, "volume",           s_cfg.volume);
-    cJSON_AddNumberToObject(root, "lcd_brightness",   s_cfg.lcd_brightness);
     cJSON_AddNumberToObject(root, "led_brightness",   s_cfg.led_brightness);
+    cJSON_AddNumberToObject(root, "lcd_brightness",   s_cfg.lcd_brightness);
+    cJSON_AddBoolToObject  (root, "auto_brightness",  s_cfg.auto_brightness);
+    cJSON_AddNumberToObject(root, "night_brightness", s_cfg.night_brightness);
+    cJSON_AddNumberToObject(root, "night_start_hour", s_cfg.night_start_hour);
+    cJSON_AddNumberToObject(root, "night_end_hour",   s_cfg.night_end_hour);
     cJSON_AddNumberToObject(root, "default_countdown_time", s_cfg.countdown_minutes);
     cJSON_AddNumberToObject(root, "pomodoro_work",          s_cfg.pomodoro_work);
     cJSON_AddNumberToObject(root, "pomodoro_break",         s_cfg.pomodoro_break);
