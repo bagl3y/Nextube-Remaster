@@ -250,8 +250,13 @@ static esp_err_t api_status(httpd_req_t *r)
     if (s && s->valid) cJSON_AddNumberToObject(root, "subscribers", s->subscriber_count);
     cJSON_AddNumberToObject(root, "heap_free", esp_get_free_heap_size());
     cJSON_AddStringToObject(root, "firmware", FW_VERSION_STR);
-    /* Read the SPIFFS-side version so the UI can warn when firmware and web
-     * UI are from different builds (e.g. after a firmware-only OTA). */
+    /* expected_spiffs: the SPIFFS version this firmware binary was built against.
+     * Baked in at compile time from version.json → spiffs_version.
+     * spiffs_version: the version actually present on the device, read at
+     * runtime from /spiffs/web/version.txt (written when SPIFFS was flashed).
+     * The UI shows a mismatch banner when these two differ — i.e. the SPIFFS
+     * image on the device is not the one this firmware expects. */
+    cJSON_AddStringToObject(root, "expected_spiffs", SPIFFS_VERSION_STR);
     char spiffs_ver[32] = "unknown";
     FILE *vf = fopen("/spiffs/web/version.txt", "r");
     if (vf) {

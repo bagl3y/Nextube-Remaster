@@ -13,8 +13,9 @@
 # FW_VERSION is set by the root CMakeLists.txt before project() is called,
 # so it is inherited into this directory scope when ESP-IDF processes
 # components during idf_build_process().
-if(NOT FW_VERSION)
-    # Fallback: re-parse version.json when FW_VERSION wasn't inherited.
+if(NOT FW_VERSION OR NOT SPIFFS_VERSION)
+    # Fallback: re-parse version.json when FW_VERSION / SPIFFS_VERSION weren't
+    # inherited from the root scope.
     #
     # IMPORTANT: use CMAKE_CURRENT_LIST_DIR (always the directory of THIS file)
     # rather than CMAKE_SOURCE_DIR.  During the ESP-IDF component requirements
@@ -28,10 +29,16 @@ if(NOT FW_VERSION)
         file(READ "${_VER_JSON_PATH}" _VER_JSON)
         string(REGEX MATCH "\"firmware_version\"[^\"]*\"([0-9]+[.][0-9]+[.][0-9]+)\"" _ "${_VER_JSON}")
         set(FW_VERSION "${CMAKE_MATCH_1}")
+        string(REGEX MATCH "\"spiffs_version\"[^\"]*\"([0-9]+[.][0-9]+[.][0-9]+)\"" _ "${_VER_JSON}")
+        set(SPIFFS_VERSION "${CMAKE_MATCH_1}")
     endif()
     if(NOT FW_VERSION)
         set(FW_VERSION "0.0.0")
-        message(WARNING "config_mgr: could not read version from version.json – using 0.0.0")
+        message(WARNING "config_mgr: could not read firmware_version from version.json – using 0.0.0")
+    endif()
+    if(NOT SPIFFS_VERSION)
+        set(SPIFFS_VERSION "${FW_VERSION}")
+        message(WARNING "config_mgr: could not read spiffs_version from version.json – defaulting to ${FW_VERSION}")
     endif()
 endif()
 
@@ -46,4 +53,5 @@ idf_component_register(
 # The #ifndef guard in fw_version.h prevents double-definition.
 target_compile_definitions(${COMPONENT_LIB} PUBLIC
     "FW_VERSION_STR=\"${FW_VERSION}\""
+    "SPIFFS_VERSION_STR=\"${SPIFFS_VERSION}\""
 )

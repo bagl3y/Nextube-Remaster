@@ -62,7 +62,7 @@ select option{background:var(--accent);color:var(--text)}
 </header>
 
 <div id="ver-mismatch" style="display:none;background:rgba(233,69,96,.15);border:1px solid rgba(233,69,96,.5);border-radius:8px;padding:.65rem 1rem;margin:.5rem 1rem 0;font-size:.83rem;line-height:1.5">
-  ⚠️ <strong>Web UI / Firmware version mismatch</strong> — firmware is <strong id="vm-fw"></strong> but SPIFFS web UI is <strong id="vm-sp"></strong>.
+  ⚠️ <strong>Web UI update required</strong> — this firmware expects SPIFFS <strong id="vm-fw"></strong> but the device has <strong id="vm-sp"></strong>.
   Go to <strong>System → Web UI Update</strong> and flash the matching <code>spiffs.bin</code>.
 </div>
 <div id="unsaved-banner">
@@ -928,10 +928,13 @@ async function refreshStatus() {
   $('s-fwver').textContent = s.firmware || '--';
   if ($('s-spver')) $('s-spver').textContent = s.spiffs_version || '--';
 
-  /* Version mismatch banner */
-  const fw = s.firmware, sp = s.spiffs_version;
-  if (fw && sp && sp !== 'unknown' && fw !== sp) {
-    $('vm-fw').textContent = fw;
+  /* Version mismatch banner — compare the SPIFFS version the firmware was
+   * built to expect (expected_spiffs) against what's actually on the device
+   * (spiffs_version).  This decouples the firmware version number from the
+   * SPIFFS version number so they can increment independently. */
+  const expected = s.expected_spiffs, sp = s.spiffs_version;
+  if (expected && sp && sp !== 'unknown' && expected !== sp) {
+    $('vm-fw').textContent = expected;
     $('vm-sp').textContent = sp;
     $('ver-mismatch').style.display = 'block';
   } else {
