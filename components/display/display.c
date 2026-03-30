@@ -1007,7 +1007,8 @@ static void display_task(void *arg)
         uint8_t target_brt = cfg->lcd_brightness;
         struct tm now_tm;
 
-        if (cfg->auto_brightness && ntp_get_local(&now_tm)) {
+        if (cfg->auto_brightness && ntp_time_synced()) {
+            ntp_get_local(&now_tm);
             int hr = now_tm.tm_hour;
             bool is_night = false;
             uint8_t start = cfg->night_start_hour;
