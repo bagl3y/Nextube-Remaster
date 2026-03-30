@@ -1014,6 +1014,34 @@ async function checkForUpdates() {
   }
 }
 
+/* ── Backup & Restore ──────────────────────────────── */
+async function exportSettings() {
+  const c = await api('settings');
+  if (!c) return toast('Could not fetch settings', true);
+  const blob = new Blob([JSON.stringify(c, null, 2)], {type: 'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'nextube-config.json'; a.click();
+  toast('Settings downloaded!');
+}
+
+async function importSettings(input) {
+  if (!input.files || !input.files[0]) return;
+  const r = new FileReader();
+  r.onload = async (e) => {
+    try {
+      const j = JSON.parse(e.target.result);
+      const res = await api('settings', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(j) });
+      if (res?.status === 'ok') {
+        toast('Settings restored! Reloading...');
+        setTimeout(() => location.reload(), 2000);
+      } else { toast('Restore failed', true); }
+    } catch(err) { toast('Invalid JSON file', true); }
+  };
+  r.readAsText(input.files[0]);
+  input.value = '';
+}
+
 /* ── Init ──────────────────────────────────────────── */
 loadSettings();
 refreshStatus();

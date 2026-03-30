@@ -189,7 +189,6 @@ static esp_err_t api_post_settings(httpd_req_t *r)
     free(buf);
 
     const nextube_config_t *cfg = config_get();
-    display_set_brightness(cfg->lcd_brightness);
     leds_set_brightness(cfg->led_brightness);
     ntp_apply_timezone();
 
