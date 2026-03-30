@@ -123,18 +123,17 @@ select option{background:var(--accent);color:var(--text)}
     <div class="field" id="tube5-section" style="display:none"><label>Tube 6 Display</label>
       <select id="f-tube5"><option value="blank">Blank</option><option value="weather">Weather Icon</option></select>
     </div>
-    <div class="field meter" id="lcdbr-row"><label>LCD Brightness</label><input type="range" id="f-lcdbr" min="0" max="100"><span id="v-lcdbr">30</span>%</div>
+    <div class="field meter"><label>LCD Brightness</label><input type="range" id="f-lcdbr" min="0" max="100"><span id="v-lcdbr">60</span>%</div>
 
     <div style="border:1px solid var(--accent);padding:.8rem;border-radius:8px;margin-bottom:1rem">
-      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem;margin-bottom:.5rem">
-        <input type="checkbox" id="f-ab-en"> Auto-Brightness
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.9rem;margin-bottom:0">
+        <input type="checkbox" id="f-ab-en"> Night Brightness
       </label>
       <div id="ab-cfg" style="display:none;margin-top:.8rem;border-top:1px solid var(--accent);padding-top:.8rem">
-        <div class="field meter"><label>Day Brightness</label><input type="range" id="f-daybr" min="0" max="100"><span id="v-daybr">60</span>%</div>
-        <div class="field meter"><label>Night Brightness</label><input type="range" id="f-nightbr" min="0" max="100"><span id="v-nightbr">30</span>%</div>
+        <div class="field meter"><label>Night LCD Brightness</label><input type="range" id="f-nightbr" min="0" max="100"><span id="v-nightbr">30</span>%</div>
         <div style="display:flex;gap:1.5rem">
-          <div class="field"><label>Day starts at</label><input type="number" id="f-daysh" min="0" max="23" style="width:50px;background:var(--accent);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px">:00</div>
           <div class="field"><label>Night starts at</label><input type="number" id="f-nightsh" min="0" max="23" style="width:50px;background:var(--accent);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px">:00</div>
+          <div class="field"><label>Night ends at</label><input type="number" id="f-nighteh" min="0" max="23" style="width:50px;background:var(--accent);border:1px solid var(--dim);color:var(--text);padding:2px 4px;border-radius:4px">:00</div>
         </div>
         <small style="color:var(--dim);display:block;margin-top:.4rem">NTP time must be synced for this to work.</small>
       </div>
@@ -469,15 +468,13 @@ document.querySelectorAll('#tabs button').forEach(b => {
 });
 
 /* ── Range sliders ─────────────────────────────────── */
-['lcdbr','ledbr','vol','daybr','nightbr'].forEach(id => {
+['lcdbr','ledbr','vol','nightbr'].forEach(id => {
   const el = $('f-'+id);
   if(el) el.oninput = () => $('v-'+id).textContent = el.value;
 });
 
 $('f-ab-en').onclick = () => {
-  const en = $('f-ab-en').checked;
-  $('ab-cfg').style.display = en ? 'block' : 'none';
-  $('lcdbr-row').style.display = en ? 'none' : 'block';
+  $('ab-cfg').style.display = $('f-ab-en').checked ? 'block' : 'none';
 };
 
 /* ── API helpers ───────────────────────────────────── */
@@ -535,13 +532,12 @@ async function loadSettings() {
   $('f-theme').value = a.theme || 'NixieOY';
   $('f-timetype').value = a.type || '24H'; onTimeTypeChange();
   $('f-tube5').value = a.clock_tube5 || 'blank';
-  $('f-lcdbr').value = cfg.lcd_brightness || 30; $('v-lcdbr').textContent = cfg.lcd_brightness || 30;
+  $('f-lcdbr').value = cfg.lcd_brightness || 60; $('v-lcdbr').textContent = cfg.lcd_brightness || 60;
   $('f-ab-en').checked = cfg.auto_brightness || false;
   $('ab-cfg').style.display = cfg.auto_brightness ? 'block' : 'none';
-  $('f-daybr').value = cfg.day_brightness || 60; $('v-daybr').textContent = cfg.day_brightness || 60;
   $('f-nightbr').value = cfg.night_brightness || 30; $('v-nightbr').textContent = cfg.night_brightness || 30;
-  $('f-daysh').value = cfg.day_start_hour !== undefined ? cfg.day_start_hour : 8;
   $('f-nightsh').value = cfg.night_start_hour !== undefined ? cfg.night_start_hour : 22;
+  $('f-nighteh').value = cfg.night_end_hour !== undefined ? cfg.night_end_hour : 7;
   $('f-ledbr').value = cfg.led_brightness || 60; $('v-ledbr').textContent = cfg.led_brightness || 60;
   $('f-blmode').value = cfg.backlight_mode || 'Breath'; onBlModeChange();
   $('f-ssid').value = cfg.ssid || '';
@@ -658,12 +654,12 @@ async function saveSettings() {
     ($('m-weather').checked     ? (1 << 7) : 0);
   const body = {
     apps: [{ name:'app1', app: cfg.apps?.[0]?.app || 'Clock', theme: $('f-theme').value, type: $('f-timetype').value, clock_tube5: $('f-tube5').value }],
-    lcd_brightness: +$('f-lcdbr').value, led_brightness: +$('f-ledbr').value,
+    lcd_brightness: +$('f-lcdbr').value,
+    led_brightness: +$('f-ledbr').value,
     auto_brightness: $('f-ab-en').checked,
-    day_brightness: +$('f-daybr').value,
     night_brightness: +$('f-nightbr').value,
-    day_start_hour: +$('f-daysh').value,
     night_start_hour: +$('f-nightsh').value,
+    night_end_hour: +$('f-nighteh').value,
     backlight_mode: $('f-blmode').value,
     backlight_RGB: colors.length ? colors : cfg.backlight_RGB,
     enabled_modes: enabledModes,
