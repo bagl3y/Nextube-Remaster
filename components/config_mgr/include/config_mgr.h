@@ -42,6 +42,11 @@ typedef struct {
     char             clock_tube5[16];    /* tube-5 content in 24H-no-sec mode: "blank"|"weather" */
     uint8_t          lcd_brightness;     /* 0-100 */
     uint8_t          led_brightness;     /* 0-100 */
+    bool             auto_brightness;    /* enable time-based dimming */
+    uint8_t          day_brightness;     /* 0-100 */
+    uint8_t          night_brightness;   /* 0-100 */
+    uint8_t          day_start_hour;     /* 0-23 */
+    uint8_t          night_start_hour;   /* 0-23 */
     backlight_mode_t backlight_mode;
     bool             backlight_on;
     uint8_t          backlight_rgb[6][3];

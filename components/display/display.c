@@ -1005,11 +1005,31 @@ static void display_task(void *arg)
         /* Apply backlight on/off whenever the config changes.
          * This is the only place that translates cfg->backlight_on into
          * an actual LEDC duty cycle, so the middle touch button works. */
+        uint8_t target_brt = cfg->lcd_brightness;
+        if (cfg->auto_brightness) {
+            struct tm now_tm;
+            ntp_get_local(&now_tm);
+            int hr = now_tm.tm_hour;
+
+            /* Check if we are in the night period.  Supports ranges that
+             * wrap around midnight (e.g. 22:00 to 08:00). */
+            bool is_night = false;
+            if (cfg->night_start_hour > cfg->day_start_hour) {
+                if (hr >= cfg->night_start_hour || hr < cfg->day_start_hour)
+                    is_night = true;
+            } else {
+                /* Rare case: Day starts after Night (e.g. Night 02:00, Day 10:00) */
+                if (hr >= cfg->night_start_hour && hr < cfg->day_start_hour)
+                    is_night = true;
+            }
+            target_brt = is_night ? cfg->night_brightness : cfg->day_brightness;
+        }
+
         if (first || cfg->backlight_on != last_bl_on ||
-                     cfg->lcd_brightness != last_bl_brt) {
-            display_set_brightness(cfg->backlight_on ? cfg->lcd_brightness : 0);
+                     target_brt != last_bl_brt) {
+            display_set_brightness(cfg->backlight_on ? target_brt : 0);
             last_bl_on  = cfg->backlight_on;
-            last_bl_brt = cfg->lcd_brightness;
+            last_bl_brt = target_brt;
         }
 
         switch (mode) {
