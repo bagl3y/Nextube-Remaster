@@ -58,10 +58,12 @@
 static const char *TAG = "audio";
 
 /* ── Runtime state ─────────────────────────────────────────────────── */
-static int               s_volume      = 20;
-static volatile bool     s_stop_flag   = false;
-static TaskHandle_t      s_audio_task  = NULL;
-static SemaphoreHandle_t s_play_mutex  = NULL;
+static int               s_volume        = 20;
+static volatile bool     s_stop_flag     = false;
+static volatile bool     s_audio_playing = false;  /* true while PCM task runs  */
+static TaskHandle_t      s_audio_task    = NULL;
+static TaskHandle_t      s_silence_task  = NULL;
+static SemaphoreHandle_t s_play_mutex    = NULL;
 
 /* DAC continuous handle – runs at all times (silence between sounds) */
 static dac_continuous_handle_t s_dac_cont = NULL;
@@ -90,20 +92,61 @@ typedef struct __attribute__((packed)) {
 /* ── DAC lifecycle helpers ──────────────────────────────────────────── */
 
 /*
- * Write a short silence burst (128 = mid-rail) into the DMA ring.
- * Called after playback drains to ensure the DMA loops silence rather
- * than the last audio descriptor.  Stack-allocated source buffer is fine
- * because dac_continuous_write() copies data into its own DMA buffers.
+ * Write exactly one full DMA descriptor (DAC_DMA_BUF_SIZE bytes) of
+ * silence (128 = mid-rail) into the DMA ring.
+ *
+ * IMPORTANT: sub-descriptor writes (e.g. 512 bytes into a 2048-byte slot)
+ * leave the driver's internal accumulation buffer in a partial state.
+ * The hardware may never schedule that partial descriptor, so the DMA
+ * keeps looping old audio data rather than transitioning to silence.
+ * Writing exactly DAC_DMA_BUF_SIZE bytes guarantees one complete
+ * descriptor is queued and the ISR picks it up on the next cycle.
  */
 static void dac_write_silence(void)
 {
     if (!s_dac_cont) return;
-    /* 512 bytes ≈ 16 ms at 32 kHz — enough for one DMA descriptor.
-     * The DMA will loop this silence until the next audio write arrives. */
-    uint8_t sil[512];
+    uint8_t sil[DAC_DMA_BUF_SIZE];   /* 2048 bytes = one full descriptor */
     memset(sil, 128, sizeof(sil));
     size_t w;
-    dac_continuous_write(s_dac_cont, sil, sizeof(sil), &w, pdMS_TO_TICKS(100));
+    dac_continuous_write(s_dac_cont, sil, sizeof(sil), &w, pdMS_TO_TICKS(200));
+}
+
+/*
+ * Silence-feed task – keeps the DMA ISR alive between sounds.
+ *
+ * Problem: when no audio is playing, the DMA enters "loop mode" (the last
+ * descriptor cycles indefinitely without generating a completion interrupt).
+ * After a few seconds in loop mode, ESP-IDF's internal TX-queue semaphore
+ * goes stale.  The next dac_continuous_write() then blocks for up to the
+ * full 1-second timeout waiting for an ISR that never fires — producing an
+ * audible ~900 ms gap/pop at the start of the next sound.
+ *
+ * Fix: this task continuously writes one silence descriptor (~64 ms at
+ * 32 kHz) to the DMA ring whenever no PCM task is running.  The write
+ * blocks for ~64 ms while the hardware plays the descriptor, then returns
+ * and queues the next one.  This keeps the completion ISR firing every
+ * ~64 ms and the TX queue semaphore in a live state.
+ *
+ * Priority 1 (lowest): never competes with the PCM task (priority 5).
+ * When s_audio_playing is true, the task yields with vTaskDelay(5 ms)
+ * to avoid interleaving silence into the audio stream.
+ */
+static void silence_feed_task(void *arg)
+{
+    uint8_t sil[DAC_DMA_BUF_SIZE];
+    memset(sil, 128, sizeof(sil));
+
+    while (1) {
+        if (s_dac_cont && !s_audio_playing) {
+            size_t w;
+            /* Blocking write: returns after the descriptor is consumed by DMA.
+             * At 32 kHz this takes ≈ 64 ms per call. */
+            dac_continuous_write(s_dac_cont, sil, sizeof(sil), &w,
+                                 pdMS_TO_TICKS(200));
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(5));
+        }
+    }
 }
 
 /*
@@ -158,21 +201,17 @@ static esp_err_t dac_cont_start(uint32_t sample_rate)
     }
     s_dac_rate = sample_rate;
 
-    /* Prime new ring: ramp 0→128 (~50 ms) then hold at 128.
-     * DMA ring starts zero-filled (0x00).  Without the ramp, the first
-     * descriptor output is 0, which through AC coupling produces a transient
-     * equal to (128 − 0) / VDD * gain.  The ramp spreads this over 50 ms at
-     * audio rate, attenuating the AC component below the audible threshold. */
+    /* Prime new ring: 0→128 ramp spread across exactly one DMA descriptor
+     * (DAC_DMA_BUF_SIZE = 2048 bytes) so the hardware always schedules a
+     * complete descriptor.  Then follow with one full silence descriptor at 128.
+     * DMA ring starts zero-filled; without this ramp the 0→128 step through
+     * the AC coupling cap would produce a single start-up transient. */
     {
-        const size_t ramp_bytes = sample_rate / 20;   /* 50 ms */
-        uint8_t     *ramp = (uint8_t *)malloc(ramp_bytes);
-        if (ramp) {
-            for (size_t i = 0; i < ramp_bytes; i++)
-                ramp[i] = (uint8_t)(128 * i / ramp_bytes);
-            size_t w;
-            dac_continuous_write(s_dac_cont, ramp, ramp_bytes, &w, pdMS_TO_TICKS(200));
-            free(ramp);
-        }
+        uint8_t ramp[DAC_DMA_BUF_SIZE];
+        for (size_t i = 0; i < DAC_DMA_BUF_SIZE; i++)
+            ramp[i] = (uint8_t)(128 * i / DAC_DMA_BUF_SIZE);
+        size_t w;
+        dac_continuous_write(s_dac_cont, ramp, sizeof(ramp), &w, pdMS_TO_TICKS(300));
     }
     dac_write_silence();   /* settle ring at 128 before audio begins */
     return ESP_OK;
@@ -250,9 +289,10 @@ static void audio_play_task(void *arg)
              (unsigned)esp_get_free_heap_size(),
              (unsigned)uxTaskGetStackHighWaterMark(NULL));
 
-    uint8_t *buf = NULL;   /* internal-SRAM DMA window */
-    /* Declared here (not inside the streaming block) so task_cleanup can
-     * read total_bytes_out regardless of which goto reaches it. */
+    uint8_t *buf     = NULL;   /* internal-SRAM DMA window              */
+    uint8_t *preload = NULL;   /* PSRAM pre-load buffer (NULL = stream) */
+    size_t   preload_n = 0;    /* processed byte count in preload buf   */
+    /* Declared here so task_cleanup can access them via any goto path. */
     uint32_t frame = 0, write_stalls = 0, total_bytes_out = 0;
 
     /* ── Open file ── */
@@ -319,98 +359,180 @@ static void audio_play_task(void *arg)
         ESP_LOGI(TAG, "Upsampling x%u: %u Hz → %u Hz (DAC min ≈19608 Hz)",
                  (unsigned)upsample, (unsigned)hdr.sample_rate, (unsigned)dac_rate);
 
-    /* ── DMA window in internal SRAM ──────────────────────────────────
-     * The DAC DMA controller cannot access PSRAM.  All PCM is streamed
-     * directly from SPIFFS into this internal-SRAM window (no pre-buffer).
-     * 8-bit mono files at 8 000 Hz are small (≤ ~32 KB) so SPIFFS read
-     * latency is negligible; fread() timing is logged for diagnostics. */
+    /* ── DMA window: internal SRAM transfer buffer ──────────────────────
+     * The DAC DMA controller cannot access PSRAM.  PCM data is moved from
+     * the PSRAM pre-load buffer (or directly from SPIFFS) into this
+     * STREAM_BUF_BYTES internal-SRAM window before each dac_continuous_write
+     * call.  DMA-capability flag is set for safety even though the driver
+     * copies data into its own DMA buffers. */
     buf = (uint8_t *)heap_caps_malloc(STREAM_BUF_BYTES,
                                       MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
     if (!buf) {
         ESP_LOGE(TAG, "OOM for DMA window (internal SRAM)");
         goto task_cleanup;
     }
-    ESP_LOGI(TAG, "DMA window @%p (internal SRAM)", buf);
+
+    /* ── PSRAM pre-buffer ───────────────────────────────────────────────
+     * Root cause of DMA ring starvation (heard as static/pops):
+     *   SPIFFS cold-cache reads can take 500+ ms per chunk (first access
+     *   after mounting or a long idle).  The DMA ring at 32 kHz holds only
+     *   ~512 ms of audio.  A 577 ms fread stall drains the ring completely,
+     *   causing the DAC to output undefined values → audible pop/static.
+     *
+     * Fix: load the entire data chunk into PSRAM before writing anything
+     * to the DMA ring.  All SPIFFS I/O happens before DAC output begins,
+     * so no mid-stream stall can drain the ring.
+     *
+     * Applies to files ≤ PSRAM_PRELOAD_MAX (256 KB).  click.wav and other
+     * notification sounds are typically ≤ 64 KB and always pre-buffered.
+     * Larger files fall back to the streaming path below.
+     *
+     * alloc_size = max(raw_bytes, expanded_bytes) to ensure the buffer is
+     * large enough to hold the raw data before in-place conversion:
+     *   8-bit  source: expanded = raw_bytes × upsample
+     *   16-bit source: raw pcm16→pcm8 halves size, then × upsample
+     *                  expanded = (raw_bytes/2) × upsample
+     * The raw_bytes > expanded case only occurs for 16-bit files at rates
+     * ≥ 20 kHz where upsample = 1 and expanded = raw_bytes/2. */
+#define PSRAM_PRELOAD_MAX  (256 * 1024)
+
+    {
+        long cur = ftell(f);
+        fseek(f, 0, SEEK_END);
+        long eof = ftell(f);
+        fseek(f, cur, SEEK_SET);
+        size_t raw_bytes = (eof > cur) ? (size_t)(eof - cur) : 0;
+
+        if (raw_bytes > 0 && raw_bytes <= PSRAM_PRELOAD_MAX) {
+            size_t post_conv   = (hdr.bits_per_sample == 16)
+                                 ? raw_bytes / 2 : raw_bytes;
+            size_t expanded    = post_conv * upsample;
+            size_t alloc_size  = (raw_bytes > expanded) ? raw_bytes : expanded;
+
+            preload = (uint8_t *)heap_caps_malloc(alloc_size, MALLOC_CAP_SPIRAM);
+            if (preload) {
+                /* ── Load entire data chunk from SPIFFS ── */
+                int64_t t_load = esp_timer_get_time();
+                size_t  got    = fread(preload, 1, raw_bytes, f);
+                ESP_LOGI(TAG, "PSRAM pre-load: %zu bytes in %lld ms",
+                         got, (long long)((esp_timer_get_time() - t_load) / 1000));
+
+                /* Volume attenuation before bit-depth conversion */
+                apply_volume(preload, (int)got, hdr.bits_per_sample, s_volume);
+
+                /* 16-bit → 8-bit unsigned in-place */
+                int out8 = (int)got;
+                if (hdr.bits_per_sample == 16)
+                    out8 = pcm16_to_pcm8(preload, (int)got);
+
+                /* Nearest-neighbour upsample in-place (back-to-front) */
+                if (upsample > 1) {
+                    for (int i = out8 - 1; i >= 0; i--) {
+                        uint8_t sv = preload[i];
+                        for (uint32_t j = 0; j < upsample; j++)
+                            preload[(uint32_t)i * upsample + j] = sv;
+                    }
+                    out8 *= (int)upsample;
+                }
+                preload_n = (size_t)out8;
+            } else {
+                ESP_LOGW(TAG, "PSRAM pre-load OOM (%zu bytes) — streaming", alloc_size);
+            }
+        }
+    }
 
     /* ── Ensure DAC continuous is running at the (possibly upsampled) rate ──
-     * Common case: driver is already running at the same rate → no-op, no
-     * transient.  Rate change → brief driver restart with a 0→128 startup
-     * ramp (handled inside dac_cont_start).  No prime ramp is needed here
-     * because the ring already holds silence (128 = mid-rail) from the
-     * last dac_write_silence() call, so the first PCM sample is a seamless
-     * continuation from silence. */
+     * Common case: driver already at 32 kHz → no-op, no transient.
+     * Rate change → brief restart with 0→128 ramp (handled inside dac_cont_start). */
     if (dac_cont_start(dac_rate) != ESP_OK)
-        goto task_cleanup;   /* buf allocated; task_cleanup frees it */
+        goto task_cleanup;
 
-    /* ── Stream PCM data directly from SPIFFS ── */
+    /* Signal silence_feed_task to pause so it doesn't interleave
+     * silence blocks into the audio stream during DMA writes. */
+    s_audio_playing = true;
+
+    /* ── Stream PCM to DMA ──────────────────────────────────────────────
+     * Primary path: serve from PSRAM pre-buffer (no SPIFFS during output).
+     * Fallback: stream directly from SPIFFS (large files or PSRAM OOM). */
     {
-        int64_t  t_start = esp_timer_get_time();
+        int64_t t_start = esp_timer_get_time();
 
-        /* When upsampling, read fewer raw bytes so the expanded output still
-         * fits inside the STREAM_BUF_BYTES DMA window.
-         *   8-bit  : read STREAM_BUF_BYTES/upsample → expand → STREAM_BUF_BYTES
-         *   16-bit : read STREAM_BUF_BYTES/upsample → pcm16_to_pcm8 halves it
-         *            → expand × upsample → STREAM_BUF_BYTES/2  (always fits)  */
-        const size_t read_size = STREAM_BUF_BYTES / upsample;
+        if (preload) {
+            /* ── PSRAM path ── */
+            size_t pos = 0;
+            while (!s_stop_flag && pos < preload_n) {
+                size_t chunk = preload_n - pos;
+                if (chunk > STREAM_BUF_BYTES) chunk = STREAM_BUF_BYTES;
+                /* Copy PSRAM → internal SRAM window (DMA reads from here) */
+                memcpy(buf, preload + pos, chunk);
+                pos += chunk;
 
-        while (!s_stop_flag) {
-            int64_t t_rd = esp_timer_get_time();
-            int rd = (int)fread(buf, 1, read_size, f);
-            int64_t rd_us = esp_timer_get_time() - t_rd;
-            if (rd <= 0) break;
-            /* Warn only if SPIFFS read latency exceeds half the DMA ring's
-             * capacity (~256 ms at 32 kHz).  Shorter spikes are absorbed
-             * silently by the ring and don't affect audio continuity. */
-            if (rd_us > 250000)
-                ESP_LOGW(TAG, "fread slow: %lld ms (frame %u)",
-                         (long long)(rd_us / 1000), frame);
-
-            /* Volume attenuation (operates on native bit depth) */
-            apply_volume(buf, rd, hdr.bits_per_sample, s_volume);
-
-            /* DAC continuous only accepts 8-bit unsigned PCM */
-            int out_bytes = rd;
-            if (hdr.bits_per_sample == 16)
-                out_bytes = pcm16_to_pcm8(buf, rd);
-
-            /* Integer nearest-neighbour upsample ─────────────────────────
-             * Expand 8-bit samples in-place, back-to-front, so we never
-             * overwrite a source sample before it has been duplicated. */
-            if (upsample > 1) {
-                for (int i = out_bytes - 1; i >= 0; i--) {
-                    uint8_t s = buf[i];
-                    for (uint32_t j = 0; j < upsample; j++)
-                        buf[(uint32_t)i * upsample + j] = s;
+                size_t written = 0;
+                int64_t t_wr = esp_timer_get_time();
+                esp_err_t werr = dac_continuous_write(s_dac_cont, buf, chunk,
+                                                      &written, pdMS_TO_TICKS(1000));
+                int64_t wr_us = esp_timer_get_time() - t_wr;
+                if (wr_us > 700000) {
+                    write_stalls++;
+                    ESP_LOGW(TAG, "DAC write stall: %lld ms (frame %u)",
+                             (long long)(wr_us / 1000), frame);
                 }
-                out_bytes *= (int)upsample;
+                if (werr != ESP_OK) {
+                    ESP_LOGW(TAG, "DAC write error %s", esp_err_to_name(werr));
+                    break;
+                }
+                total_bytes_out += (uint32_t)written;
+                frame++;
             }
+            free(preload);
+            preload = NULL;
+        } else {
+            /* ── SPIFFS streaming fallback (large files) ── */
+            const size_t read_size = STREAM_BUF_BYTES / upsample;
+            while (!s_stop_flag) {
+                int64_t t_rd = esp_timer_get_time();
+                int rd = (int)fread(buf, 1, read_size, f);
+                int64_t rd_us = esp_timer_get_time() - t_rd;
+                if (rd <= 0) break;
+                if (rd_us > 250000)
+                    ESP_LOGW(TAG, "fread slow: %lld ms (frame %u)",
+                             (long long)(rd_us / 1000), frame);
 
-            size_t written = 0;
-            int64_t t_wr = esp_timer_get_time();
-            esp_err_t werr = dac_continuous_write(s_dac_cont, buf, (size_t)out_bytes,
-                                                  &written, pdMS_TO_TICKS(1000));
-            int64_t wr_us = esp_timer_get_time() - t_wr;
+                apply_volume(buf, rd, hdr.bits_per_sample, s_volume);
 
-            /* Stall detection: only flag if the write blocked for longer than
-             * a full ring drain (ring_bytes/dac_rate ≈ 512 ms at 32 kHz) plus
-             * margin.  Normal back-pressure for short files that nearly fill
-             * the ring (e.g. a 500 ms click in a 512 ms ring) can legitimately
-             * block for ~330 ms — well below 700 ms — and produces no gap.
-             * A real problem (DMA stopped, descriptor queue wedged) would
-             * approach or exceed the 1000 ms write timeout. */
-            if (wr_us > 700000) {
-                write_stalls++;
-                ESP_LOGW(TAG, "DAC write stall: %lld ms (frame %u, written=%u/%d)",
-                         (long long)(wr_us / 1000), frame,
-                         (unsigned)written, out_bytes);
+                int out_bytes = rd;
+                if (hdr.bits_per_sample == 16)
+                    out_bytes = pcm16_to_pcm8(buf, rd);
+
+                if (upsample > 1) {
+                    for (int i = out_bytes - 1; i >= 0; i--) {
+                        uint8_t sv = buf[i];
+                        for (uint32_t j = 0; j < upsample; j++)
+                            buf[(uint32_t)i * upsample + j] = sv;
+                    }
+                    out_bytes *= (int)upsample;
+                }
+
+                size_t written = 0;
+                int64_t t_wr = esp_timer_get_time();
+                esp_err_t werr = dac_continuous_write(s_dac_cont, buf,
+                                                      (size_t)out_bytes,
+                                                      &written, pdMS_TO_TICKS(1000));
+                int64_t wr_us = esp_timer_get_time() - t_wr;
+                if (wr_us > 700000) {
+                    write_stalls++;
+                    ESP_LOGW(TAG, "DAC write stall: %lld ms (frame %u, written=%u/%d)",
+                             (long long)(wr_us / 1000), frame,
+                             (unsigned)written, out_bytes);
+                }
+                if (werr != ESP_OK) {
+                    ESP_LOGW(TAG, "DAC write error %s — stopping playback",
+                             esp_err_to_name(werr));
+                    break;
+                }
+                total_bytes_out += (uint32_t)written;
+                frame++;
             }
-            if (werr != ESP_OK) {
-                ESP_LOGW(TAG, "DAC write error %s — stopping playback",
-                         esp_err_to_name(werr));
-                break;
-            }
-            total_bytes_out += (uint32_t)written;
-            frame++;
         }
 
         int64_t elapsed_ms = (esp_timer_get_time() - t_start) / 1000;
@@ -419,28 +541,26 @@ static void audio_play_task(void *arg)
     }
 
 task_cleanup:
+    /* Release the silence_feed_task BEFORE the drain wait so it does not
+     * insert silence into the still-playing ring, then settle with one
+     * full silence descriptor after the ring drains. */
+    s_audio_playing = false;
+    if (preload) { free(preload); preload = NULL; }
+
     if (buf && s_dac_cont) {
         /* ── End-of-playback: drain ring, then restore silence ─────────────
          *
-         * Wait for all queued audio frames to play out, then flood the DMA
-         * ring with silence (128 = mid-rail).  The driver stays running; the
-         * DMA will loop those silence descriptors until the next sound starts.
-         *
-         * Why silence (128) instead of zero:
-         *   The AC coupling cap charges to V_cap = V_DAC_avg − VDD/2.
-         *   Idling at 128 keeps V_cap ≈ 0, so the next audio start sees
-         *   V_amp_in = first_sample − 0 = first_sample — no stored charge to
-         *   release as a transient.  Idling at 0 would charge V_cap = −VDD/2,
-         *   turning every playback start into a full-rail spike (the chirp).
+         * Wait for all queued audio frames to play out, then write one full
+         * silence descriptor (128 = mid-rail).  The driver stays running;
+         * silence_feed_task resumes and keeps the ISR alive.
          *
          * Drain timing: ring_occ = min(total_bytes_out, ring_bytes).
-         * We wait until the ring has drained before writing silence so that
-         * silence bytes don't delay the next sound (they'd sit behind audio). */
+         * Writing silence AFTER the wait avoids pushing the silence bytes
+         * behind un-played audio (which would delay the next sound). */
         const uint32_t ring_bytes = (uint32_t)DAC_DESC_NUM * DAC_DMA_BUF_SIZE;
         uint32_t ring_occ = (total_bytes_out < ring_bytes) ? total_bytes_out : ring_bytes;
         vTaskDelay(pdMS_TO_TICKS(ring_occ * 1000 / dac_rate + 150));
-        /* Ring is now (mostly) empty — write silence so DMA loops 128. */
-        dac_write_silence();
+        dac_write_silence();   /* one full 2048-byte descriptor at 128 */
     }
     free(buf);
     dac_cont_stop();   /* intentional no-op: driver keeps running */
@@ -495,25 +615,27 @@ void audio_init(void)
         }
     } else {
         s_dac_rate = 32000;
-        /* Startup ramp 0→128 over ~50 ms, then settle at 128.
-         * The DMA ring is zero-initialised at enable().  Without the ramp the
-         * very first descriptor output is 0, and the AC coupling step from
-         * 0→128 would cause a single startup transient.  The ramp spreads it
-         * over 50 ms, attenuating the fundamental (≈ 20 Hz) to inaudible. */
+        /* Startup ramp: 0→128 spread across exactly one DMA descriptor
+         * (DAC_DMA_BUF_SIZE = 2048 bytes) so a complete descriptor is always
+         * scheduled.  Sub-descriptor writes can leave the TX queue in a partial
+         * state, preventing the ISR from firing and stalling subsequent writes.
+         * Follow with one full silence descriptor at 128 to settle the ring. */
         {
-            const size_t ramp_bytes = 32000 / 20;   /* 50 ms at 32 kHz */
-            uint8_t     *ramp = (uint8_t *)malloc(ramp_bytes);
-            if (ramp) {
-                for (size_t i = 0; i < ramp_bytes; i++)
-                    ramp[i] = (uint8_t)(128 * i / ramp_bytes);
-                size_t w;
-                dac_continuous_write(s_dac_cont, ramp, ramp_bytes, &w,
-                                     pdMS_TO_TICKS(200));
-                free(ramp);
-            }
+            uint8_t ramp[DAC_DMA_BUF_SIZE];
+            for (size_t i = 0; i < DAC_DMA_BUF_SIZE; i++)
+                ramp[i] = (uint8_t)(128 * i / DAC_DMA_BUF_SIZE);
+            size_t w;
+            dac_continuous_write(s_dac_cont, ramp, sizeof(ramp), &w,
+                                 pdMS_TO_TICKS(300));
         }
-        dac_write_silence();   /* ring now holds 128; DMA loops silence */
+        dac_write_silence();   /* ring now holds 128; DMA ISR active */
         ESP_LOGI(TAG, "DAC continuous started at 32 kHz — ring primed with silence");
+
+        /* Start the silence-feed task.  This task keeps writing silence to
+         * the DMA ring between sounds so the completion ISR fires every ~64 ms.
+         * Without it, after a few seconds of idle the DMA enters loop-mode and
+         * the ISR stops firing, causing a ~900 ms stall on the next write. */
+        xTaskCreate(silence_feed_task, "sil_feed", 2048, NULL, 1, &s_silence_task);
     }
 
     /* Binary semaphore (no task-ownership enforcement).
