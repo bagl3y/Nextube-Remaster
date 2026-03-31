@@ -407,10 +407,6 @@ static void audio_play_task(void *arg)
     if (dac_cont_start(dac_rate) != ESP_OK)
         goto task_cleanup;
 
-    /* Signal silence_feed_task to pause so it doesn't interleave
-     * silence blocks into the audio stream during DMA writes. */
-    s_audio_playing = true;
-
     /* ── Stream PCM to DMA ──────────────────────────────────────────────
      * Primary path: serve from PSRAM pre-buffer (no SPIFFS during output).
      * Fallback: stream directly from SPIFFS (large files or PSRAM OOM). */
@@ -501,10 +497,6 @@ static void audio_play_task(void *arg)
     }
 
 task_cleanup:
-    /* Release the silence_feed_task BEFORE the drain wait so it does not
-     * insert silence into the still-playing ring, then settle with one
-     * full silence descriptor after the ring drains. */
-    s_audio_playing = false;
     if (preload) { free(preload); preload = NULL; }
 
     if (buf && s_dac_cont) {
@@ -512,7 +504,6 @@ task_cleanup:
          *
          * Wait for all queued audio frames to play out, then write one full
          * silence descriptor (128 = mid-rail).  The driver stays running;
-         * silence_feed_task resumes and keeps the ISR alive.
          *
          * Drain timing: ring_occ = min(total_bytes_out, ring_bytes).
          * Writing silence AFTER the wait avoids pushing the silence bytes
@@ -591,11 +582,6 @@ void audio_init(void)
         dac_write_silence();   /* ring now holds 128; DMA ISR active */
         ESP_LOGI(TAG, "DAC continuous started at 32 kHz — ring primed with silence");
 
-        /* Start the silence-feed task.  This task keeps writing silence to
-         * the DMA ring between sounds so the completion ISR fires every ~64 ms.
-         * Without it, after a few seconds of idle the DMA enters loop-mode and
-         * the ISR stops firing, causing a ~900 ms stall on the next write. */
-        xTaskCreate(silence_feed_task, "sil_feed", 2048, NULL, 1, &s_silence_task);
     }
 
     /* Binary semaphore (no task-ownership enforcement).
