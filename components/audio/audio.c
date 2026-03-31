@@ -15,35 +15,23 @@
  * Playback runs in a dedicated FreeRTOS task so audio_play_file() returns
  * immediately.  A mutex serialises concurrent play requests.
  *
- * DAC lifecycle – always-on continuous driver:
- *   The dac_continuous driver is started once in audio_init() and NEVER
- *   stopped.  Between sounds the DMA ring loops silence (value 128 = mid-rail).
- *
- *   Why always-on?
- *     The LTK8002D is AC-coupled.  The coupling cap charges to:
- *       V_cap = V_DAC_avg − VDD/2
- *     Idling the DAC at 128 (= VDD/2) keeps V_cap ≈ 0.  When audio starts
- *     (PCM samples centred on 128) or stops, V_amp_in = V_DAC − V_cap ≈ VDD/2
- *     throughout — no stored charge to release as a transient → no chirp.
- *
- *     The previous approach (oneshot at 0 ↔ continuous) charged the cap to
- *     V_cap = −VDD/2 at idle.  Switching to continuous (which starts at 0 then
- *     ramps to 128) produced V_amp_in = 128_step − (−VDD/2) = full-rail spike,
- *     audible as a chirp through the amplifier on every button press.
- *
- *   Silence = 128 streams at the current sample rate between sounds.
- *   On playback start: if the driver is already running at the correct sample
- *     rate (common case) — zero reconfiguration, zero transient.
- *   On playback end: a short silence flush replaces residual audio samples in
- *     the DMA ring, then the driver keeps running.
- *   Rate change (rare): driver is briefly recreated; a startup ramp minimises
- *     the single transient that occurs on the very first enable.
+ * DAC mode lifecycle:
+ *   idle    – oneshot channel holds DAC at 0 (low rail).
+ *             AC-coupled output: idle voltage doesn't matter; the amp's
+ *             internal bias holds its input at VDD/2 regardless.
+ *             Idling at 0 makes every mode-switch a 0→0 transition —
+ *             matching the DMA ring's zero-initialised state — so no
+ *             voltage step occurs at the amp input on mode change.
+ *   playing – oneshot deleted, continuous channel streams PCM samples;
+ *             DMA prime ramp (0→128) and end ramp (128→0) handle the
+ *             transitions at audio sample rate.
  */
 
 #include "audio.h"
 #include "board_pins.h"
 #include "esp_log.h"
 #include "driver/dac_continuous.h"
+#include "driver/dac_oneshot.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -63,9 +51,9 @@ static volatile bool     s_stop_flag   = false;
 static TaskHandle_t      s_audio_task  = NULL;
 static SemaphoreHandle_t s_play_mutex  = NULL;
 
-/* DAC continuous handle – runs at all times (silence between sounds) */
-static dac_continuous_handle_t s_dac_cont = NULL;
-static uint32_t                s_dac_rate = 0;   /* current driver sample rate */
+/* DAC handles – only one is active at a time */
+static dac_continuous_handle_t s_dac_cont = NULL;   /* during playback */
+static dac_oneshot_handle_t    s_dac_one  = NULL;   /* during idle     */
 
 /* ── Buffer / DMA sizes ─────────────────────────────────────────────── */
 #define STREAM_BUF_BYTES   4096   /* file read chunk; also 8-bit output buf */
@@ -90,52 +78,23 @@ typedef struct __attribute__((packed)) {
 /* ── DAC lifecycle helpers ──────────────────────────────────────────── */
 
 /*
- * Write exactly one full DMA descriptor (DAC_DMA_BUF_SIZE bytes) of
- * silence (128 = mid-rail) into the DMA ring.
- *
- * IMPORTANT: sub-descriptor writes (e.g. 512 bytes into a 2048-byte slot)
- * leave the driver's internal accumulation buffer in a partial state.
- * The hardware may never schedule that partial descriptor, so the DMA
- * keeps looping old audio data rather than transitioning to silence.
- * Writing exactly DAC_DMA_BUF_SIZE bytes guarantees one complete
- * descriptor is queued and the ISR picks it up on the next cycle.
- */
-static void dac_write_silence(void)
-{
-    if (!s_dac_cont) return;
-    uint8_t sil[DAC_DMA_BUF_SIZE];   /* 2048 bytes = one full descriptor */
-    memset(sil, 128, sizeof(sil));
-    size_t w;
-    dac_continuous_write(s_dac_cont, sil, sizeof(sil), &w, pdMS_TO_TICKS(200));
-}
-
-/*
- * Ensure the DAC continuous driver is running at `sample_rate`.
- *
- * Common case (rate unchanged): driver already running — no-op, returns OK.
- *   No mode switch → no transient → no chirp.
- *
- * Rate change (rare): briefly recreates the driver at the new rate.
- *   A 0→128 startup ramp is written to smooth the initial DMA-zero → mid-rail
- *   transition through the AC coupling cap.  A transient is unavoidable on
- *   the very first enable, but this code path is only hit when WAV files with
- *   different sample rates are played back-to-back.
+ * Transition from idle (oneshot) to continuous mode for streaming.
+ * Oneshot and continuous channels cannot coexist on the same DAC output.
  */
 static esp_err_t dac_cont_start(uint32_t sample_rate)
 {
-    if (s_dac_cont && s_dac_rate == sample_rate) {
-        /* Already running at the correct rate — nothing to reconfigure. */
-        return ESP_OK;
+    if (s_dac_one) {
+        dac_oneshot_del_channel(s_dac_one);
+        s_dac_one = NULL;
     }
 
+    /* Guard: clean up any orphaned continuous handle left by a previous
+     * task that was killed before reaching dac_cont_stop(). */
     if (s_dac_cont) {
-        /* Rate change: tear down and recreate at the new rate. */
-        ESP_LOGI(TAG, "DAC rate change %u → %u Hz — brief restart",
-                 (unsigned)s_dac_rate, (unsigned)sample_rate);
+        ESP_LOGW(TAG, "Orphaned dac_cont handle — cleaning up");
         dac_continuous_disable(s_dac_cont);
         dac_continuous_del_channels(s_dac_cont);
         s_dac_cont = NULL;
-        s_dac_rate = 0;
     }
 
     dac_continuous_config_t cfg = {
@@ -149,6 +108,9 @@ static esp_err_t dac_cont_start(uint32_t sample_rate)
     esp_err_t err = dac_continuous_new_channels(&cfg, &s_dac_cont);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "dac_continuous_new_channels: %s", esp_err_to_name(err));
+        dac_oneshot_config_t one_cfg = { .chan_id = DAC_CHAN_0 };
+        if (dac_oneshot_new_channel(&one_cfg, &s_dac_one) == ESP_OK)
+            dac_oneshot_output_voltage(s_dac_one, 0);
         return err;
     }
 
@@ -157,43 +119,41 @@ static esp_err_t dac_cont_start(uint32_t sample_rate)
         ESP_LOGE(TAG, "dac_continuous_enable: %s", esp_err_to_name(err));
         dac_continuous_del_channels(s_dac_cont);
         s_dac_cont = NULL;
+        dac_oneshot_config_t one_cfg = { .chan_id = DAC_CHAN_0 };
+        if (dac_oneshot_new_channel(&one_cfg, &s_dac_one) == ESP_OK)
+            dac_oneshot_output_voltage(s_dac_one, 0);
         return err;
     }
-    s_dac_rate = sample_rate;
 
-    /* Prime new ring: 0→128 ramp spread across exactly one DMA descriptor
-     * (DAC_DMA_BUF_SIZE = 2048 bytes) so the hardware always schedules a
-     * complete descriptor.  Then follow with one full silence descriptor at 128.
-     * DMA ring starts zero-filled; without this ramp the 0→128 step through
-     * the AC coupling cap would produce a single start-up transient. */
-    {
-        uint8_t ramp[DAC_DMA_BUF_SIZE];
-        for (size_t i = 0; i < DAC_DMA_BUF_SIZE; i++)
-            ramp[i] = (uint8_t)(128 * i / DAC_DMA_BUF_SIZE);
-        size_t w;
-        dac_continuous_write(s_dac_cont, ramp, sizeof(ramp), &w, pdMS_TO_TICKS(300));
-    }
-    dac_write_silence();   /* settle ring at 128 before audio begins */
+    /* No prime ramp.
+     *
+     * The DMA ring is zero-initialised.  With oneshot idling at 0,
+     * V_cap = −VDD/2.  The DMA starting at 0 is the same voltage as the
+     * oneshot — V_amp_in = 0 − (−VDD/2) = VDD/2 = silence, no transient.
+     *
+     * The first audio sample (≈128 for a click WAV that starts at silence)
+     * creates a single-sample step (31 µs at 32 kHz, fundamental ≈ 16 kHz).
+     * At that frequency the ear is far less sensitive than the 7 Hz chirp
+     * produced by the old 64 ms ramp, and the transient lands on the click's
+     * own attack — perceptually masked by the sound itself. */
     return ESP_OK;
 }
 
 /*
- * End-of-playback: keep the continuous driver running.
- *
- * The driver is intentionally NOT stopped here.  Stopping and restarting the
- * driver on each sound is the root cause of the chirp: it recharges the AC
- * coupling cap from an unpredictable voltage to the new idle level, producing
- * a transient through the LTK8002D amplifier.
- *
- * Instead, the caller (task_cleanup) writes silence (128) back into the DMA
- * ring BEFORE calling dac_cont_stop(), so the ring loops silence when audio
- * ends.  dac_cont_stop() is now a logging-only no-op that documents intent.
+ * Transition from continuous mode back to idle (oneshot at 0).
  */
 static void dac_cont_stop(void)
 {
-    /* Intentional no-op: driver keeps running with silence (128) in the ring.
-     * See file header for the AC-coupling rationale. */
-    ESP_LOGD(TAG, "dac_cont_stop: driver left running at %u Hz", (unsigned)s_dac_rate);
+    if (s_dac_cont) {
+        dac_continuous_disable(s_dac_cont);
+        dac_continuous_del_channels(s_dac_cont);
+        s_dac_cont = NULL;
+    }
+    if (!s_dac_one) {
+        dac_oneshot_config_t one_cfg = { .chan_id = DAC_CHAN_0 };
+        if (dac_oneshot_new_channel(&one_cfg, &s_dac_one) == ESP_OK)
+            dac_oneshot_output_voltage(s_dac_one, 0);
+    }
 }
 
 /* ── Volume scaling ─────────────────────────────────────────────────── */
@@ -500,21 +460,23 @@ task_cleanup:
     if (preload) { free(preload); preload = NULL; }
 
     if (buf && s_dac_cont) {
-        /* ── End-of-playback: drain ring, then restore silence ─────────────
-         *
-         * Wait for all queued audio frames to play out, then write one full
-         * silence descriptor (128 = mid-rail).  The driver stays running;
-         *
-         * Drain timing: ring_occ = min(total_bytes_out, ring_bytes).
-         * Writing silence AFTER the wait avoids pushing the silence bytes
-         * behind un-played audio (which would delay the next sound). */
+        /* ── End-of-playback fade ─────────────────────────────────────────
+         * Append a 128→0 ramp so the last output value is 0, matching the
+         * RTC register (idle = 0).  dac_cont_stop() then switches DAC from
+         * digi-bypass to the RTC register — a 0→0 transition, silent.
+         * Ramp = DAC_DMA_BUF_SIZE samples = one full descriptor. */
         const uint32_t ring_bytes = (uint32_t)DAC_DESC_NUM * DAC_DMA_BUF_SIZE;
+        for (size_t i = 0; i < DAC_DMA_BUF_SIZE; i++)
+            buf[i] = (uint8_t)(128 * (DAC_DMA_BUF_SIZE - 1 - i) / (DAC_DMA_BUF_SIZE - 1));
+        size_t _fw;
+        dac_continuous_write(s_dac_cont, buf, DAC_DMA_BUF_SIZE, &_fw,
+                             pdMS_TO_TICKS(500));
+
         uint32_t ring_occ = (total_bytes_out < ring_bytes) ? total_bytes_out : ring_bytes;
         vTaskDelay(pdMS_TO_TICKS(ring_occ * 1000 / dac_rate + 150));
-        dac_write_silence();   /* one full 2048-byte descriptor at 128 */
     }
     free(buf);
-    dac_cont_stop();   /* intentional no-op: driver keeps running */
+    dac_cont_stop();
 
 task_close:
     fclose(f);
@@ -538,51 +500,18 @@ void audio_init(void)
      * silencing the diagnostic logs in audio_play_task. */
     esp_log_level_set(TAG, ESP_LOG_INFO);
 
-    ESP_LOGI(TAG, "Audio init – DAC GPIO%d (always-on continuous, idle at 128)",
-             PIN_AUDIO_DAC);
+    ESP_LOGI(TAG, "Audio init – DAC GPIO%d", PIN_AUDIO_DAC);
 
-    /* Start the DAC continuous driver immediately at a 32 kHz default rate.
-     * It runs permanently; sounds are written into the DMA ring on demand and
-     * silence (128 = mid-rail) fills the ring between sounds.
-     *
-     * Keeping the driver always running means the AC coupling cap stays
-     * charged to V_cap ≈ 0 (DAC avg = VDD/2 = 128).  Every playback start
-     * and stop is therefore a 128→audio and audio→128 transition with V_cap≈0,
-     * producing V_amp_in = VDD/2 throughout — no chirps, no pops. */
-    dac_continuous_config_t cfg = {
-        .chan_mask = DAC_CHANNEL_MASK_CH0,
-        .desc_num  = DAC_DESC_NUM,
-        .buf_size  = DAC_DMA_BUF_SIZE,
-        .freq_hz   = 32000,
-        .clk_src   = DAC_DIGI_CLK_SRC_DEFAULT,
-        .chan_mode  = DAC_CHANNEL_MODE_SIMUL,
-    };
-    if (dac_continuous_new_channels(&cfg, &s_dac_cont) != ESP_OK ||
-        dac_continuous_enable(s_dac_cont) != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start DAC continuous driver — audio disabled");
-        if (s_dac_cont) {
-            dac_continuous_del_channels(s_dac_cont);
-            s_dac_cont = NULL;
-        }
-    } else {
-        s_dac_rate = 32000;
-        /* Startup ramp: 0→128 spread across exactly one DMA descriptor
-         * (DAC_DMA_BUF_SIZE = 2048 bytes) so a complete descriptor is always
-         * scheduled.  Sub-descriptor writes can leave the TX queue in a partial
-         * state, preventing the ISR from firing and stalling subsequent writes.
-         * Follow with one full silence descriptor at 128 to settle the ring. */
-        {
-            uint8_t ramp[DAC_DMA_BUF_SIZE];
-            for (size_t i = 0; i < DAC_DMA_BUF_SIZE; i++)
-                ramp[i] = (uint8_t)(128 * i / DAC_DMA_BUF_SIZE);
-            size_t w;
-            dac_continuous_write(s_dac_cont, ramp, sizeof(ramp), &w,
-                                 pdMS_TO_TICKS(300));
-        }
-        dac_write_silence();   /* ring now holds 128; DMA ISR active */
-        ESP_LOGI(TAG, "DAC continuous started at 32 kHz — ring primed with silence");
-
-    }
+    /* Start in oneshot mode.  Idle at 0 (low rail).
+     * AC-coupling means idle voltage has no bearing on silence: the cap
+     * blocks DC and the LTK8002D biases its input to VDD/2 regardless.
+     * Idling at 0 means mode-switch transients (0→float→0) produce no
+     * voltage change at the amp input — no pop at start or end of sound.
+     * Crucially, the I2S/DMA hardware is completely off at idle, so there
+     * is no switching noise coupling into the DAC analog output. */
+    dac_oneshot_config_t one_cfg = { .chan_id = DAC_CHAN_0 };
+    ESP_ERROR_CHECK(dac_oneshot_new_channel(&one_cfg, &s_dac_one));
+    dac_oneshot_output_voltage(s_dac_one, 0);
 
     /* Binary semaphore (no task-ownership enforcement).
      * A mutex requires that the same task which called xSemaphoreTake also
@@ -670,9 +599,8 @@ void audio_set_volume(int vol)
 void audio_stop(void)
 {
     s_stop_flag = true;
-    /* Poll briefly for playback task to finish (it gives the mutex on exit).
-     * The task writes silence into the ring before exiting, so the DAC
-     * output is already at 128 (mid-rail) when it returns. */
     for (int i = 0; i < 30 && s_audio_task != NULL; i++)
         vTaskDelay(pdMS_TO_TICKS(10));
+    if (s_audio_task == NULL && s_dac_one)
+        dac_oneshot_output_voltage(s_dac_one, 0);
 }
