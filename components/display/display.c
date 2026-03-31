@@ -55,14 +55,6 @@ static void st7735_init_one(int tube)
     lcd_cmd(0x01); vTaskDelay(pdMS_TO_TICKS(150)); /* SWRESET */
     lcd_cmd(0x11); vTaskDelay(pdMS_TO_TICKS(120)); /* SLPOUT  */
 
-    /* Power Control – values typical for ST7735 IPS panels to improve contrast/vibrancy */
-    lcd_cmd(0xC0); uint8_t pc1[] = {0xA2, 0x02, 0x84}; lcd_data(pc1, 3);
-    lcd_cmd(0xC1); uint8_t pc2[] = {0xC5};             lcd_data(pc2, 1);
-    lcd_cmd(0xC2); uint8_t pc3[] = {0x0A, 0x00};       lcd_data(pc3, 2);
-    lcd_cmd(0xC3); uint8_t pc4[] = {0x8A, 0x2A};       lcd_data(pc4, 2);
-    lcd_cmd(0xC4); uint8_t pc5[] = {0x8A, 0xEE};       lcd_data(pc5, 2);
-    lcd_cmd(0xC5); uint8_t vcom[] = {0x0E};            lcd_data(vcom, 1);
-
     /* Gamma Correction – ensures correct luminance curve and prevents washed-out look */
     lcd_cmd(0xE0); uint8_t gm1[] = {0x02, 0x1C, 0x07, 0x12, 0x37, 0x32, 0x29, 0x2D, 0x29, 0x25, 0x2B, 0x39, 0x00, 0x01, 0x03, 0x10}; lcd_data(gm1, 16);
     lcd_cmd(0xE1); uint8_t gm2[] = {0x03, 0x1D, 0x07, 0x06, 0x2E, 0x2C, 0x29, 0x2D, 0x2E, 0x2E, 0x37, 0x3F, 0x00, 0x00, 0x02, 0x10}; lcd_data(gm2, 16);
