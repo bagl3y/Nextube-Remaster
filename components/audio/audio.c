@@ -58,12 +58,10 @@
 static const char *TAG = "audio";
 
 /* ── Runtime state ─────────────────────────────────────────────────── */
-static int               s_volume        = 20;
-static volatile bool     s_stop_flag     = false;
-static volatile bool     s_audio_playing = false;  /* true while PCM task runs  */
-static TaskHandle_t      s_audio_task    = NULL;
-static TaskHandle_t      s_silence_task  = NULL;
-static SemaphoreHandle_t s_play_mutex    = NULL;
+static int               s_volume      = 20;
+static volatile bool     s_stop_flag   = false;
+static TaskHandle_t      s_audio_task  = NULL;
+static SemaphoreHandle_t s_play_mutex  = NULL;
 
 /* DAC continuous handle – runs at all times (silence between sounds) */
 static dac_continuous_handle_t s_dac_cont = NULL;
@@ -109,44 +107,6 @@ static void dac_write_silence(void)
     memset(sil, 128, sizeof(sil));
     size_t w;
     dac_continuous_write(s_dac_cont, sil, sizeof(sil), &w, pdMS_TO_TICKS(200));
-}
-
-/*
- * Silence-feed task – keeps the DMA ISR alive between sounds.
- *
- * Problem: when no audio is playing, the DMA enters "loop mode" (the last
- * descriptor cycles indefinitely without generating a completion interrupt).
- * After a few seconds in loop mode, ESP-IDF's internal TX-queue semaphore
- * goes stale.  The next dac_continuous_write() then blocks for up to the
- * full 1-second timeout waiting for an ISR that never fires — producing an
- * audible ~900 ms gap/pop at the start of the next sound.
- *
- * Fix: this task continuously writes one silence descriptor (~64 ms at
- * 32 kHz) to the DMA ring whenever no PCM task is running.  The write
- * blocks for ~64 ms while the hardware plays the descriptor, then returns
- * and queues the next one.  This keeps the completion ISR firing every
- * ~64 ms and the TX queue semaphore in a live state.
- *
- * Priority 1 (lowest): never competes with the PCM task (priority 5).
- * When s_audio_playing is true, the task yields with vTaskDelay(5 ms)
- * to avoid interleaving silence into the audio stream.
- */
-static void silence_feed_task(void *arg)
-{
-    uint8_t sil[DAC_DMA_BUF_SIZE];
-    memset(sil, 128, sizeof(sil));
-
-    while (1) {
-        if (s_dac_cont && !s_audio_playing) {
-            size_t w;
-            /* Blocking write: returns after the descriptor is consumed by DMA.
-             * At 32 kHz this takes ≈ 64 ms per call. */
-            dac_continuous_write(s_dac_cont, sil, sizeof(sil), &w,
-                                 pdMS_TO_TICKS(200));
-        } else {
-            vTaskDelay(pdMS_TO_TICKS(5));
-        }
-    }
 }
 
 /*
