@@ -110,7 +110,7 @@ static esp_err_t dac_cont_start(uint32_t sample_rate)
         ESP_LOGE(TAG, "dac_continuous_new_channels: %s", esp_err_to_name(err));
         dac_oneshot_config_t one_cfg = { .chan_id = DAC_CHAN_0 };
         if (dac_oneshot_new_channel(&one_cfg, &s_dac_one) == ESP_OK)
-            dac_oneshot_output_voltage(s_dac_one, 0);
+            dac_oneshot_output_voltage(s_dac_one, 128);
         return err;
     }
 
@@ -121,7 +121,7 @@ static esp_err_t dac_cont_start(uint32_t sample_rate)
         s_dac_cont = NULL;
         dac_oneshot_config_t one_cfg = { .chan_id = DAC_CHAN_0 };
         if (dac_oneshot_new_channel(&one_cfg, &s_dac_one) == ESP_OK)
-            dac_oneshot_output_voltage(s_dac_one, 0);
+            dac_oneshot_output_voltage(s_dac_one, 128);
         return err;
     }
 
@@ -152,7 +152,7 @@ static void dac_cont_stop(void)
     if (!s_dac_one) {
         dac_oneshot_config_t one_cfg = { .chan_id = DAC_CHAN_0 };
         if (dac_oneshot_new_channel(&one_cfg, &s_dac_one) == ESP_OK)
-            dac_oneshot_output_voltage(s_dac_one, 0);
+            dac_oneshot_output_voltage(s_dac_one, 128);  /* mid-rail = silence */
     }
 }
 
@@ -460,14 +460,13 @@ task_cleanup:
     if (preload) { free(preload); preload = NULL; }
 
     if (buf && s_dac_cont) {
-        /* ── End-of-playback fade ─────────────────────────────────────────
-         * Append a 128→0 ramp so the last output value is 0, matching the
-         * RTC register (idle = 0).  dac_cont_stop() then switches DAC from
-         * digi-bypass to the RTC register — a 0→0 transition, silent.
-         * Ramp = DAC_DMA_BUF_SIZE samples = one full descriptor. */
+        /* ── End-of-playback silence flush ───────────────────────────────
+         * Append one full descriptor of mid-rail silence (128) so the last
+         * DAC output settles at 128 before dac_cont_stop() switches back to
+         * oneshot.  Oneshot idles at 128, so the mode-switch is 128→128 —
+         * no voltage step, no pop. */
         const uint32_t ring_bytes = (uint32_t)DAC_DESC_NUM * DAC_DMA_BUF_SIZE;
-        for (size_t i = 0; i < DAC_DMA_BUF_SIZE; i++)
-            buf[i] = (uint8_t)(128 * (DAC_DMA_BUF_SIZE - 1 - i) / (DAC_DMA_BUF_SIZE - 1));
+        memset(buf, 128, DAC_DMA_BUF_SIZE);
         size_t _fw;
         dac_continuous_write(s_dac_cont, buf, DAC_DMA_BUF_SIZE, &_fw,
                              pdMS_TO_TICKS(500));
@@ -502,16 +501,15 @@ void audio_init(void)
 
     ESP_LOGI(TAG, "Audio init – DAC GPIO%d", PIN_AUDIO_DAC);
 
-    /* Start in oneshot mode.  Idle at 0 (low rail).
-     * AC-coupling means idle voltage has no bearing on silence: the cap
-     * blocks DC and the LTK8002D biases its input to VDD/2 regardless.
-     * Idling at 0 means mode-switch transients (0→float→0) produce no
-     * voltage change at the amp input — no pop at start or end of sound.
-     * Crucially, the I2S/DMA hardware is completely off at idle, so there
-     * is no switching noise coupling into the DAC analog output. */
+    /* Start in oneshot mode.  Idle at 128 (mid-rail = DAC silence level).
+     * 8-bit unsigned PCM encodes silence as 128 (DC mid-rail), not 0.
+     * Idling at 128 means when DMA takes over, its first sample (128 for
+     * a silent-start WAV) produces no voltage step at the amp input — no
+     * pop.  The I2S/DMA hardware is completely off at idle, so there is
+     * no switching noise coupling into the DAC analog output. */
     dac_oneshot_config_t one_cfg = { .chan_id = DAC_CHAN_0 };
     ESP_ERROR_CHECK(dac_oneshot_new_channel(&one_cfg, &s_dac_one));
-    dac_oneshot_output_voltage(s_dac_one, 0);
+    dac_oneshot_output_voltage(s_dac_one, 128);
 
     /* Binary semaphore (no task-ownership enforcement).
      * A mutex requires that the same task which called xSemaphoreTake also
@@ -602,5 +600,5 @@ void audio_stop(void)
     for (int i = 0; i < 30 && s_audio_task != NULL; i++)
         vTaskDelay(pdMS_TO_TICKS(10));
     if (s_audio_task == NULL && s_dac_one)
-        dac_oneshot_output_voltage(s_dac_one, 0);
+        dac_oneshot_output_voltage(s_dac_one, 128);
 }
