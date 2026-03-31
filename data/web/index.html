@@ -454,8 +454,8 @@ function clearDirty() {
   dirty = false;
   document.getElementById('unsaved-banner').classList.remove('show');
 }
-document.querySelector('main').addEventListener('input',  markDirty);
-document.querySelector('main').addEventListener('change', markDirty);
+document.querySelector('main').addEventListener('input',  e => { if (e.target.type !== 'file') markDirty(); });
+document.querySelector('main').addEventListener('change', e => { if (e.target.type !== 'file') markDirty(); });
 
 /* ── Tabs ──────────────────────────────────────────── */
 document.querySelectorAll('#tabs button').forEach(b => {
