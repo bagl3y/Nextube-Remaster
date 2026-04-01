@@ -24,6 +24,13 @@
 
 static const char *TAG = "leds";
 
+/* Set true by audio driver while a sound is playing.
+ * The LED task skips ws2812_write() while this is set, stopping RMT
+ * 10 MHz bursts that cause current spikes on the shared 3.3 V rail.
+ * WS2812 LEDs latch their last colour and need no refresh to stay on. */
+static volatile bool s_audio_active = false;
+void leds_set_audio_active(bool active) { s_audio_active = active; }
+
 /* GRB pixel buffer (WS2812 colour order) */
 static uint8_t led_data[LED_COUNT][3];  /* [G, R, B] */
 static uint8_t brightness = 60;
@@ -164,27 +171,57 @@ void leds_effect_rainbow(void)
 static void led_task(void *arg)
 {
     while (1) {
+        /* Skip all RMT transmissions while audio is playing.
+         * WS2812 hold their last colour — no visual glitch, no rail noise. */
+        if (s_audio_active) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
+
         const nextube_config_t *cfg = config_get();
         /* led_brightness is 0=off, 100=full bright — use directly. */
         leds_set_brightness(cfg->led_brightness);
 
         switch (cfg->backlight_mode) {
-        case BL_MODE_STATIC:
-            for (int i = 0; i < LED_COUNT; i++) {
-                leds_set_color(i,
-                    cfg->backlight_rgb[i][0],
-                    cfg->backlight_rgb[i][1],
-                    cfg->backlight_rgb[i][2]);
+        case BL_MODE_STATIC: {
+            /* In static mode, transmit once when colour/brightness changes
+             * then stop.  WS2812 latch their last colour indefinitely —
+             * no periodic refresh needed.  Eliminating continuous RMT
+             * bursts reduces periodic noise spikes on the 3.3 V rail. */
+            static uint8_t last_rgb[LED_COUNT][3];
+            static uint8_t last_brt = 0xFF;
+            bool changed = (cfg->led_brightness != last_brt);
+            if (!changed) {
+                for (int i = 0; i < LED_COUNT && !changed; i++)
+                    changed = memcmp(last_rgb[i], cfg->backlight_rgb[i], 3) != 0;
             }
-            leds_update();
-            vTaskDelay(pdMS_TO_TICKS(100));   /* static: update slowly */
+            if (changed) {
+                for (int i = 0; i < LED_COUNT; i++) {
+                    leds_set_color(i,
+                        cfg->backlight_rgb[i][0],
+                        cfg->backlight_rgb[i][1],
+                        cfg->backlight_rgb[i][2]);
+                    memcpy(last_rgb[i], cfg->backlight_rgb[i], 3);
+                }
+                last_brt = cfg->led_brightness;
+                leds_update();
+            }
+            vTaskDelay(pdMS_TO_TICKS(100));
             break;
+        }
         case BL_MODE_BREATH: {
             /* Modulate each tube's configured colour with a sine-wave envelope.
              * The old leds_effect_breath() used a hardcoded blue palette;
-             * this version respects the per-tube backlight_RGB settings. */
+             * this version respects the per-tube backlight_RGB settings.
+             *
+             * Update rate is 10 Hz (100 ms) rather than 20 Hz (50 ms).
+             * The phase increment is doubled (0.10 vs 0.05) so the breath
+             * cycle duration is unchanged (~6.3 s).  Halving the RMT burst
+             * rate keeps the 10 MHz WS2812 transmission fundamental below
+             * 20 Hz, reducing audible coupling into the DAC / amplifier
+             * from WS2812 current spikes on the shared 3.3 V rail. */
             static float breath_phase = 0.0f;
-            breath_phase += 0.05f;
+            breath_phase += 0.10f;
             float val = (sinf(breath_phase) + 1.0f) / 2.0f;  /* 0.0 – 1.0 */
             for (int i = 0; i < LED_COUNT; i++) {
                 leds_set_color(i,
@@ -193,7 +230,7 @@ static void led_task(void *arg)
                     (uint8_t)(cfg->backlight_rgb[i][2] * val));
             }
             leds_update();
-            vTaskDelay(pdMS_TO_TICKS(50));
+            vTaskDelay(pdMS_TO_TICKS(100));
             break;
         }
         case BL_MODE_RAINBOW:

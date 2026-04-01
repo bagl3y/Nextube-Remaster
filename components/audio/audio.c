@@ -14,27 +14,33 @@
  * immediately.  A mutex serialises concurrent play requests.
  *
  * DAC mode lifecycle:
- *   idle    – oneshot channel holds DAC at 128 (mid-rail = 8-bit silence).
- *             I2S/DMA hardware is completely off.  This is critical: the
- *             WS2812 RMT driver fires at 10 MHz on GPIO32 every ~50 ms
- *             (breathing effect).  With I2S/DMA off the RMT cannot cause
- *             DMA bus contention or couple noise into the DAC output.
+ *   idle    – GPIO25 configured as Hi-Z input (GPIO_MODE_INPUT).
+ *             The DAC analog output buffer is completely powered down.
+ *             WS2812 current spikes on the shared 3.3 V rail have no
+ *             coupling path into the amp — only thermal noise remains.
+ *             The amp's internal bias resistors hold its input at VDD/2
+ *             through the AC cap; V_cap = 0.
  *
- *   playing – oneshot deleted, continuous channel streams PCM.
- *             On entry the DMA ring is primed with one full descriptor of
- *             128 (mid-rail silence) before any audio data is written.
- *             The oneshot was also at 128, so the DAC output stays at
- *             128 through the mode switch — V_cap = 0 throughout — and
- *             there is no voltage step at the amp input (no pop/chirp).
- *             On exit a 128-silence flush drains the ring to 128, then
- *             oneshot resumes at 128 — again a 128→128 non-event.
+ *   playing – GPIO25 reclaimed by dac_continuous_new_channels().
+ *             The DMA ring is primed with a 64-sample 0→128 ramp followed
+ *             by flat 128 (mid-rail silence) before audio data is written.
+ *             The ramp starts at 0, matching the DMA ring's zero-init, so
+ *             there is no discontinuity.  It rises to 128 over ~2 ms and
+ *             audio (also near 128 for a silent-start WAV) follows without
+ *             a voltage step — V_cap = 0 throughout — no pop/chirp.
+ *             WS2812 RMT is paused via leds_set_audio_active(true) for the
+ *             duration of playback to prevent rail-noise coupling.
+ *             On exit, the ring is flushed with 128 silence, DAC is stopped,
+ *             GPIO25 returns to Hi-Z, and LEDs resume.
  */
 
 #include "audio.h"
+#include "leds.h"
 #include "board_pins.h"
 #include "esp_log.h"
 #include "driver/dac_continuous.h"
 #include "driver/dac_oneshot.h"
+#include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -115,7 +121,7 @@ static esp_err_t dac_cont_start(uint32_t sample_rate)
     esp_err_t err = dac_continuous_new_channels(&cfg, &s_dac_cont);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "dac_continuous_new_channels: %s", esp_err_to_name(err));
-        goto fail_restore_oneshot;
+        goto fail_restore_hiz;
     }
 
     err = dac_continuous_enable(s_dac_cont);
@@ -123,19 +129,32 @@ static esp_err_t dac_cont_start(uint32_t sample_rate)
         ESP_LOGE(TAG, "dac_continuous_enable: %s", esp_err_to_name(err));
         dac_continuous_del_channels(s_dac_cont);
         s_dac_cont = NULL;
-        goto fail_restore_oneshot;
+        goto fail_restore_hiz;
     }
 
-    /* Prime the ring with mid-rail silence so the DAC outputs 128 from
-     * the very first sample — matching the oneshot idle level.
-     * V_cap was 0 at idle (oneshot at 128 = VDD/2), and stays 0 now.
-     * The first real audio sample (also near 128 for a silent-start WAV)
-     * creates no voltage step → no pop. */
+    /* Prime the ring with a short 0→128 ramp followed by flat silence.
+     *
+     * At idle, GPIO25 is Hi-Z and the AC-coupling cap settles to V_cap = 0
+     * (both sides at VDD/2 via the amp's internal bias resistors).  The
+     * DMA ring is zero-initialised, so the first bytes output by the
+     * hardware are 0 — which with V_cap = 0 means V_amp_in = 0 (ground).
+     * The ramp starts at 0, matching that zero-init, so there is no
+     * discontinuity.  It rises to 128 (VDD/2) over DAC_PRIME_RAMP_SAMPLES,
+     * after which audio data (also near 128 for a silent-start WAV) follows
+     * without a voltage step.
+     *
+     * Ramp duration: 64 samples at 32 kHz = 2 ms.  This is short enough
+     * to be perceived as a soft transient onset rather than a tonal chirp,
+     * and is completely masked by the click sound's own attack. */
+#define DAC_PRIME_RAMP_SAMPLES 64
     {
         uint8_t *prime = (uint8_t *)heap_caps_malloc(DAC_DMA_BUF_SIZE,
                                                      MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
         if (prime) {
-            memset(prime, 128, DAC_DMA_BUF_SIZE);
+            for (size_t i = 0; i < DAC_PRIME_RAMP_SAMPLES; i++)
+                prime[i] = (uint8_t)(128 * i / (DAC_PRIME_RAMP_SAMPLES - 1));
+            memset(prime + DAC_PRIME_RAMP_SAMPLES, 128,
+                   DAC_DMA_BUF_SIZE - DAC_PRIME_RAMP_SAMPLES);
             size_t w;
             dac_continuous_write(s_dac_cont, prime, DAC_DMA_BUF_SIZE,
                                  &w, pdMS_TO_TICKS(200));
@@ -144,20 +163,22 @@ static esp_err_t dac_cont_start(uint32_t sample_rate)
     }
     return ESP_OK;
 
-fail_restore_oneshot:
-    {
-        dac_oneshot_config_t one_cfg = { .chan_id = DAC_CHAN_0 };
-        if (dac_oneshot_new_channel(&one_cfg, &s_dac_one) == ESP_OK)
-            dac_oneshot_output_voltage(s_dac_one, 128);
-    }
+fail_restore_hiz:
+    gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_INPUT);
     return err;
 }
 
 /*
- * Transition from continuous mode back to idle (oneshot at 128).
- * Call only after the 128-silence flush + drain wait in task_cleanup,
- * so the last DAC output was 128 — the oneshot takes over at 128.
- * No voltage step, no pop.
+ * Transition from continuous mode back to DAC-off idle.
+ *
+ * After the 128-silence flush and drain wait the last DAC output is 128
+ * (VDD/2), so V_cap = 0.  We then delete the DAC channel and configure
+ * GPIO25 as a Hi-Z input.  With the DAC analog output buffer powered
+ * down, WS2812 current spikes on the 3.3 V rail have no path through
+ * the DAC buffer into the LTK8002D amplifier — the noise floor drops
+ * to the amp's own thermal noise.  The amp's internal bias resistors
+ * hold its input at VDD/2 through the AC cap (V_cap = 0), so when the
+ * DAC restarts at 128 the transition is seamless.
  */
 static void dac_cont_stop(void)
 {
@@ -166,11 +187,14 @@ static void dac_cont_stop(void)
         dac_continuous_del_channels(s_dac_cont);
         s_dac_cont = NULL;
     }
-    if (!s_dac_one) {
-        dac_oneshot_config_t one_cfg = { .chan_id = DAC_CHAN_0 };
-        if (dac_oneshot_new_channel(&one_cfg, &s_dac_one) == ESP_OK)
-            dac_oneshot_output_voltage(s_dac_one, 128);
+    /* Delete oneshot too if somehow present, then go Hi-Z */
+    if (s_dac_one) {
+        dac_oneshot_del_channel(s_dac_one);
+        s_dac_one = NULL;
     }
+    /* Hi-Z: DAC output buffer off, GPIO25 floating.
+     * Amp input biases to VDD/2 through internal resistors — silence. */
+    gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_INPUT);
 }
 
 /* ── Volume scaling ─────────────────────────────────────────────────── */
@@ -331,6 +355,11 @@ static void audio_play_task(void *arg)
         }
     }
 
+    /* ── Pause LED RMT before starting DAC ─────────────────────────────
+     * WS2812 current spikes on the 3.3 V rail couple into the DAC output.
+     * Pausing RMT stops all transmissions; LEDs hold their last colour. */
+    leds_set_audio_active(true);
+
     /* ── Start DAC continuous (oneshot → continuous + prime ring) ── */
     if (dac_cont_start(dac_rate) != ESP_OK)
         goto task_cleanup;
@@ -440,6 +469,9 @@ task_cleanup:
     free(buf);
     dac_cont_stop();
 
+    /* Resume LED RMT now that DAC is back to quiet oneshot idle. */
+    leds_set_audio_active(false);
+
 task_close:
     fclose(f);
 task_exit:
@@ -460,20 +492,20 @@ void audio_init(void)
     esp_log_level_set(TAG, ESP_LOG_INFO);
     ESP_LOGI(TAG, "Audio init – DAC GPIO%d", PIN_AUDIO_DAC);
 
-    /* Idle in oneshot mode at 128 (mid-rail = 8-bit silence).
+    /* Idle with DAC completely off — GPIO25 Hi-Z (input).
      *
-     * Keeping I2S/DMA hardware completely off at idle is essential:
-     * the WS2812 accent LEDs use the RMT peripheral at 10 MHz, which
-     * causes DMA bus contention and/or EMI coupling if I2S is also
-     * running.  With I2S off, RMT transmissions are inaudible.
+     * With the DAC analog output buffer powered down, WS2812 current
+     * spikes on the shared 3.3 V rail have no path through the DAC
+     * buffer into the LTK8002D amplifier.  The amp's internal bias
+     * resistors hold its input at VDD/2 through the AC coupling cap,
+     * so the amp output is silent.
      *
-     * Idling at 128 (not 0) means V_cap = V_DAC − VDD/2 = 0.
-     * dac_cont_start() primes the ring with 128 before writing audio,
-     * so the mode switch and first audio sample create no voltage step
-     * at the amplifier input — no pop or chirp. */
-    dac_oneshot_config_t one_cfg = { .chan_id = DAC_CHAN_0 };
-    ESP_ERROR_CHECK(dac_oneshot_new_channel(&one_cfg, &s_dac_one));
-    dac_oneshot_output_voltage(s_dac_one, 128);
+     * dac_cont_start() reconfigures GPIO25 for DAC use and primes the
+     * DMA ring with 128 (VDD/2) before writing audio.  V_cap = 0 at
+     * idle (both sides of the cap at VDD/2), so the first DAC sample
+     * at 128 creates no voltage step — no pop. */
+    gpio_reset_pin(PIN_AUDIO_DAC);
+    gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_INPUT);
 
     /* Binary semaphore – cross-task give/take pattern (play_file takes
      * in caller's task, play_task gives on exit). */
@@ -541,6 +573,7 @@ void audio_stop(void)
     s_stop_flag = true;
     for (int i = 0; i < 30 && s_audio_task != NULL; i++)
         vTaskDelay(pdMS_TO_TICKS(10));
-    if (s_audio_task == NULL && s_dac_one)
-        dac_oneshot_output_voltage(s_dac_one, 128);
+    /* Ensure DAC is off if task exited without reaching dac_cont_stop() */
+    if (s_audio_task == NULL && !s_dac_cont && !s_dac_one)
+        gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_INPUT);
 }
