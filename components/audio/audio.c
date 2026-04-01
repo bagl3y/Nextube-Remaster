@@ -106,30 +106,36 @@ static esp_err_t dac_cont_start(uint32_t sample_rate)
         .buf_size  = DAC_DMA_BUF_SIZE,
         .freq_hz   = sample_rate,
         .clk_src   = DAC_DIGI_CLK_SRC_DEFAULT,
+        .chan_mode = DAC_CHANNEL_MODE_SIMUL,
     };
     
     esp_err_t err = dac_continuous_new_channels(&cfg, &s_dac_cont);
     if (err != ESP_OK) return err;
 
+    /* Prepare the fade-in buffer BEFORE enabling the DAC to prevent 
+     * a momentary 0V gap. We use a 40ms mathematical S-Curve. */
+    size_t fade_samples = (sample_rate * 40) / 1000; 
+    fade_samples = (fade_samples + 3) & ~3; /* Force 4-byte alignment */
+    
+    uint8_t *fade_buf = (uint8_t *)calloc(1, fade_samples);
+    if (fade_buf) {
+        for (size_t i = 0; i < fade_samples; i++) {
+            float t = (float)i / (float)fade_samples;
+            /* Smooth Cosine S-Curve from 0 to 128 */
+            fade_buf[i] = (uint8_t)(64.0f * (1.0f - cosf(t * (float)M_PI)));
+        }
+    }
+
+    /* Enable hardware and instantly write the fade buffer */
     err = dac_continuous_enable(s_dac_cont);
     if (err != ESP_OK) {
+        if (fade_buf) free(fade_buf);
         dac_continuous_del_channels(s_dac_cont);
         s_dac_cont = NULL;
         return err;
     }
 
-    /* Smooth fade-in from 0 to 128 (VDD/2). 
-     * The DMA buffer initializes at 0, which perfectly matches our 
-     * driven-ground idle state. We smoothly charge the AC cap over 20ms. */
-    size_t fade_samples = (sample_rate * 20) / 1000; 
-    fade_samples = (fade_samples + 3) & ~3; /* Force 4-byte alignment */
-    
-    /* Use standard calloc to guarantee 8-bit accessible DRAM. */
-    uint8_t *fade_buf = (uint8_t *)calloc(1, fade_samples);
     if (fade_buf) {
-        for (size_t i = 0; i < fade_samples; i++) {
-            fade_buf[i] = (uint8_t)((i * 128) / fade_samples);
-        }
         size_t w;
         dac_continuous_write(s_dac_cont, fade_buf, fade_samples, &w, pdMS_TO_TICKS(200));
         free(fade_buf);
@@ -400,30 +406,34 @@ task_cleanup:
     if (preload) { free(preload); preload = NULL; }
 
     if (buf && s_dac_cont) {
-        /* Fade-out from 128 to 0 to gracefully discharge the AC cap */
-        size_t fade_samples = (dac_rate * 20) / 1000;
-        fade_samples = (fade_samples + 3) & ~3; /* Force 4-byte alignment */
+        size_t fade_samples = (dac_rate * 40) / 1000;
+        fade_samples = (fade_samples + 3) & ~3;
         
-        /* Cap to STREAM_BUF_BYTES sanity check */
         if (fade_samples > STREAM_BUF_BYTES) fade_samples = STREAM_BUF_BYTES;
         
-        /* Reuse the main 'buf' to avoid memory allocation during cleanup
-         * and guarantee 8-bit accessible DRAM. */
         for (size_t i = 0; i < fade_samples; i++) {
-            buf[i] = (uint8_t)(128 - ((i * 128) / fade_samples));
+            float t = (float)i / (float)fade_samples;
+            /* Smooth Cosine S-Curve from 128 down to 0 */
+            buf[i] = (uint8_t)(64.0f * (1.0f + cosf(t * (float)M_PI)));
         }
         
         size_t w;
         dac_continuous_write(s_dac_cont, buf, fade_samples, &w, pdMS_TO_TICKS(200));
         
-        /* Wait briefly for DMA to physically output the fade buffer */
-        vTaskDelay(pdMS_TO_TICKS(30));
+        /* WE MUST WAIT FOR THE DMA RING TO COMPLETELY DRAIN!
+         * If we shut the DAC off prematurely, it cuts the sound mid-wave 
+         * and causes a massive pop. We calculate the exact milliseconds needed. */
+        uint32_t ring_bytes = DAC_DESC_NUM * DAC_DMA_BUF_SIZE;
+        uint32_t pending_bytes = total_bytes_out + fade_samples;
+        uint32_t bytes_to_drain = (pending_bytes < ring_bytes) ? pending_bytes : ring_bytes;
+        uint32_t drain_time_ms = (bytes_to_drain * 1000) / dac_rate;
+        
+        vTaskDelay(pdMS_TO_TICKS(drain_time_ms + 50)); 
     }
     
     free(buf);
     dac_cont_stop();
 
-    /* Resume LED RMT now that DAC is back to 0V driven idle. */
     leds_set_audio_active(false);
 
 task_close:
