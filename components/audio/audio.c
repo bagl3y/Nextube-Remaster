@@ -120,11 +120,11 @@ static esp_err_t dac_cont_start(uint32_t sample_rate)
         return err;
     }
 
-    /* Smooth fade-in from 0 to 128 (VDD/2). 
-     * The DMA buffer initializes at 0, which perfectly matches our 
-     * driven-ground idle state. We smoothly charge the AC cap over 20ms. */
+    /* Smooth fade-in from 0 to 128 (VDD/2). */
     size_t fade_samples = (sample_rate * 20) / 1000; 
-    uint8_t *fade_buf = (uint8_t *)heap_caps_malloc(fade_samples, MALLOC_CAP_INTERNAL);
+    fade_samples = (fade_samples + 3) & ~3; /* Force 4-byte alignment */
+    
+    uint8_t *fade_buf = (uint8_t *)heap_caps_malloc(fade_samples, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
     if (fade_buf) {
         for (size_t i = 0; i < fade_samples; i++) {
             fade_buf[i] = (uint8_t)((i * 128) / fade_samples);
@@ -330,6 +330,10 @@ static void audio_play_task(void *arg)
             while (!s_stop_flag && pos < preload_n) {
                 size_t chunk = preload_n - pos;
                 if (chunk > STREAM_BUF_BYTES) chunk = STREAM_BUF_BYTES;
+                
+                chunk &= ~3; 
+                if (chunk == 0) break;
+                
                 memcpy(buf, preload + pos, chunk);
                 pos += chunk;
 
@@ -378,6 +382,9 @@ static void audio_play_task(void *arg)
                     }
                     out_bytes *= (int)upsample;
                 }
+                
+                out_bytes &= ~3;
+                if (out_bytes == 0) break;
 
                 size_t written = 0;
                 int64_t t_wr = esp_timer_get_time();
@@ -413,6 +420,7 @@ task_cleanup:
     if (buf && s_dac_cont) {
         /* Fade-out from 128 to 0 to gracefully discharge the AC cap */
         size_t fade_samples = (dac_rate * 20) / 1000;
+        fade_samples = (fade_samples + 3) & ~3; /* Force 4-byte alignment */
         uint8_t *fade_buf = (uint8_t *)heap_caps_malloc(fade_samples, MALLOC_CAP_INTERNAL);
         if (fade_buf) {
             for (size_t i = 0; i < fade_samples; i++) {
