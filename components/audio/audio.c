@@ -137,65 +137,6 @@ static esp_err_t dac_cont_start(uint32_t sample_rate)
     return ESP_OK;
 }
 
-    /* ── Step 3: Create and enable the continuous channel ─────────────── */
-    dac_continuous_config_t cfg = {
-        .chan_mask = DAC_CHANNEL_MASK_CH0,
-        .desc_num  = DAC_DESC_NUM,
-        .buf_size  = DAC_DMA_BUF_SIZE,
-        .freq_hz   = sample_rate,
-        .clk_src   = DAC_DIGI_CLK_SRC_DEFAULT,
-        .chan_mode  = DAC_CHANNEL_MODE_SIMUL,
-    };
-    esp_err_t err = dac_continuous_new_channels(&cfg, &s_dac_cont);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "dac_continuous_new_channels: %s", esp_err_to_name(err));
-        goto fail_restore_hiz;
-    }
-
-    err = dac_continuous_enable(s_dac_cont);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "dac_continuous_enable: %s", esp_err_to_name(err));
-        dac_continuous_del_channels(s_dac_cont);
-        s_dac_cont = NULL;
-        goto fail_restore_hiz;
-    }
-
-    /* ── Step 4: Write prime immediately after enable ───────────────────
-     *
-     * The DMA ring is zero-initialised.  With V_cap = 0 from the oneshot
-     * pre-charge, any brief zero-output before our write lands would
-     * produce V_amp_in = 0 (ground).  Writing 128 as fast as possible
-     * (buffer is already filled) minimises that window.
-     *
-     * Once the prime lands, V_DAC = 128 = VDD/2 → V_amp_in = VDD/2 = silence.
-     * Audio data follows without a voltage step — no pop, no chirp.      */
-    if (prime) {
-        size_t w;
-        dac_continuous_write(s_dac_cont, prime, DAC_DMA_BUF_SIZE,
-                             &w, pdMS_TO_TICKS(200));
-        free(prime);
-        prime = NULL;
-    }
-    return ESP_OK;
-
-fail_restore_hiz:
-    free(prime);
-    gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_INPUT);
-    return err;
-}
-
-/*
- * Transition from continuous mode back to DAC-off idle.
- *
- * After the 128-silence flush and drain wait the last DAC output is 128
- * (VDD/2), so V_cap = 0.  We then delete the DAC channel and configure
- * GPIO25 as a Hi-Z input.  With the DAC analog output buffer powered
- * down, WS2812 current spikes on the 3.3 V rail have no path through
- * the DAC buffer into the LTK8002D amplifier — the noise floor drops
- * to the amp's own thermal noise.  The amp's internal bias resistors
- * hold its input at VDD/2 through the AC cap (V_cap = 0), so when the
- * DAC restarts at 128 the transition is seamless.
- */
 static void dac_cont_stop(void)
 {
     if (s_dac_cont) {
