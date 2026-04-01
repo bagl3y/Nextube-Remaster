@@ -96,51 +96,46 @@ typedef struct __attribute__((packed)) {
  */
 static esp_err_t dac_cont_start(uint32_t sample_rate)
 {
-    if (s_dac_one) {
-        dac_oneshot_del_channel(s_dac_one);
-        s_dac_one = NULL;
-    }
-
-    /* Guard: clean up any orphaned continuous handle. */
     if (s_dac_cont) {
-        ESP_LOGW(TAG, "Orphaned dac_cont handle — cleaning up");
         dac_continuous_disable(s_dac_cont);
         dac_continuous_del_channels(s_dac_cont);
         s_dac_cont = NULL;
     }
 
-    /* ── Step 1: Pre-fill the prime buffer before touching the DAC ──────
-     * Allocating memory between dac_continuous_enable() and the first
-     * dac_continuous_write() extends the window during which the DMA
-     * ring outputs its zero-initialised content.  Do the allocation and
-     * fill now so the write can follow enable with minimal delay. */
-    uint8_t *prime = (uint8_t *)heap_caps_malloc(DAC_DMA_BUF_SIZE,
-                                                  MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
-    if (prime)
-        memset(prime, 128, DAC_DMA_BUF_SIZE);   /* flat mid-rail silence */
+    dac_continuous_config_t cfg = {
+        .chan_mask = DAC_CHANNEL_MASK_CH0,
+        .desc_num  = DAC_DESC_NUM,
+        .buf_size  = DAC_DMA_BUF_SIZE,
+        .freq_hz   = sample_rate,
+        .clk_src   = DAC_DIGI_CLK_SRC_DEFAULT,
+        .chan_mode  = DAC_CHANNEL_MODE_SIMUL,
+    };
+    esp_err_t err = dac_continuous_new_channels(&cfg, &s_dac_cont);
+    if (err != ESP_OK) return err;
 
-    /* ── Step 2: Pre-charge the AC-coupling cap via oneshot at 128 ──────
-     *
-     * At Hi-Z idle both sides of the AC cap settle to VDD/2 through the
-     * amp's bias resistors, giving V_cap = 0.  After a long idle this
-     * is already true, but if the previous sound left V_cap at a non-zero
-     * residual the oneshot corrects it.
-     *
-     * The WS2812 RMT is already paused (leds_set_audio_active(true) was
-     * called before this function), so there is no rail-noise coupling
-     * through the DAC buffer during this window.
-     *
-     * 15 ms covers > 1 RC time constant for coupling caps with a 100 Hz
-     * cut-off (RC = 1.6 ms) and > 1.5 RC at 20 Hz (RC = 8 ms).         */
-    {
-        dac_oneshot_handle_t     precharge = NULL;
-        dac_oneshot_config_t     one_cfg   = { .chan_id = DAC_CHAN_0 };
-        if (dac_oneshot_new_channel(&one_cfg, &precharge) == ESP_OK) {
-            dac_oneshot_output_voltage(precharge, 128);
-            vTaskDelay(pdMS_TO_TICKS(15));
-            dac_oneshot_del_channel(precharge);
-        }
+    err = dac_continuous_enable(s_dac_cont);
+    if (err != ESP_OK) {
+        dac_continuous_del_channels(s_dac_cont);
+        s_dac_cont = NULL;
+        return err;
     }
+
+    /* Smooth fade-in from 0 to 128 (VDD/2). 
+     * The DMA buffer initializes at 0, which perfectly matches our 
+     * driven-ground idle state. We smoothly charge the AC cap over 20ms. */
+    size_t fade_samples = (sample_rate * 20) / 1000; 
+    uint8_t *fade_buf = (uint8_t *)heap_caps_malloc(fade_samples, MALLOC_CAP_INTERNAL);
+    if (fade_buf) {
+        for (size_t i = 0; i < fade_samples; i++) {
+            fade_buf[i] = (uint8_t)((i * 128) / fade_samples);
+        }
+        size_t w;
+        dac_continuous_write(s_dac_cont, fade_buf, fade_samples, &w, pdMS_TO_TICKS(200));
+        free(fade_buf);
+    }
+
+    return ESP_OK;
+}
 
     /* ── Step 3: Create and enable the continuous channel ─────────────── */
     dac_continuous_config_t cfg = {
@@ -208,14 +203,13 @@ static void dac_cont_stop(void)
         dac_continuous_del_channels(s_dac_cont);
         s_dac_cont = NULL;
     }
-    /* Delete oneshot too if somehow present, then go Hi-Z */
-    if (s_dac_one) {
-        dac_oneshot_del_channel(s_dac_one);
-        s_dac_one = NULL;
-    }
-    /* Hi-Z: DAC output buffer off, GPIO25 floating.
-     * Amp input biases to VDD/2 through internal resistors — silence. */
-    gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_INPUT);
+    
+    /* Drive pin LOW (0V) instead of Hi-Z. 
+     * This provides a low-impedance path to ground that rejects 
+     * WS2812/WiFi EMI crosstalk, killing the static floor. */
+    gpio_reset_pin(PIN_AUDIO_DAC);
+    gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_OUTPUT);
+    gpio_set_level(PIN_AUDIO_DAC, 0);
 }
 
 /* ── Volume scaling ─────────────────────────────────────────────────── */
@@ -476,21 +470,25 @@ task_cleanup:
     if (preload) { free(preload); preload = NULL; }
 
     if (buf && s_dac_cont) {
-        /* Flush ring with 128 silence so the last DAC output is mid-rail.
-         * dac_cont_stop() then restores oneshot at 128 — a 128→128
-         * transition, no voltage step, no pop. */
-        const uint32_t ring_bytes = (uint32_t)DAC_DESC_NUM * DAC_DMA_BUF_SIZE;
-        memset(buf, 128, DAC_DMA_BUF_SIZE);
-        size_t _fw;
-        dac_continuous_write(s_dac_cont, buf, DAC_DMA_BUF_SIZE,
-                             &_fw, pdMS_TO_TICKS(500));
-        uint32_t ring_occ = (total_bytes_out < ring_bytes) ? total_bytes_out : ring_bytes;
-        vTaskDelay(pdMS_TO_TICKS(ring_occ * 1000 / dac_rate + 150));
+        /* Fade-out from 128 to 0 to gracefully discharge the AC cap */
+        size_t fade_samples = (dac_rate * 20) / 1000;
+        uint8_t *fade_buf = (uint8_t *)heap_caps_malloc(fade_samples, MALLOC_CAP_INTERNAL);
+        if (fade_buf) {
+            for (size_t i = 0; i < fade_samples; i++) {
+                fade_buf[i] = (uint8_t)(128 - ((i * 128) / fade_samples));
+            }
+            size_t w;
+            dac_continuous_write(s_dac_cont, fade_buf, fade_samples, &w, pdMS_TO_TICKS(200));
+            free(fade_buf);
+        }
+        
+        /* Wait briefly for DMA to physically output the fade buffer */
+        vTaskDelay(pdMS_TO_TICKS(30));
     }
     free(buf);
     dac_cont_stop();
 
-    /* Resume LED RMT now that DAC is back to quiet oneshot idle. */
+    /* Resume LED RMT now that DAC is back to 0V driven idle. */
     leds_set_audio_active(false);
 
 task_close:
@@ -526,7 +524,8 @@ void audio_init(void)
      * idle (both sides of the cap at VDD/2), so the first DAC sample
      * at 128 creates no voltage step — no pop. */
     gpio_reset_pin(PIN_AUDIO_DAC);
-    gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_INPUT);
+    gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_OUTPUT);
+    gpio_set_level(PIN_AUDIO_DAC, 0);
 
     /* Binary semaphore – cross-task give/take pattern (play_file takes
      * in caller's task, play_task gives on exit). */
@@ -559,9 +558,10 @@ void audio_init(void)
         }
         dac_continuous_del_channels(warmup);
     }
-    /* Return GPIO25 to Hi-Z after warm-up */
+    /* Return GPIO25 to actively driven LOW after warm-up */
     gpio_reset_pin(PIN_AUDIO_DAC);
-    gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_INPUT);
+    gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_OUTPUT);
+    gpio_set_level(PIN_AUDIO_DAC, 0);
     ESP_LOGI(TAG, "DAC warm-up done");
 }
 
