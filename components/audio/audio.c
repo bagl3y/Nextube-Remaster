@@ -120,11 +120,8 @@ static esp_err_t dac_cont_start(uint32_t sample_rate)
         return err;
     }
 
-    /* Smooth fade-in from 0 to 128 (VDD/2). */
-    size_t fade_samples = (sample_rate * 20) / 1000; 
-    fade_samples = (fade_samples + 3) & ~3; /* Force 4-byte alignment */
-    
-    uint8_t *fade_buf = (uint8_t *)heap_caps_malloc(fade_samples, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    /* Use standard calloc to guarantee 8-bit accessible DRAM. */
+    uint8_t *fade_buf = (uint8_t *)calloc(1, fade_samples);
     if (fade_buf) {
         for (size_t i = 0; i < fade_samples; i++) {
             fade_buf[i] = (uint8_t)((i * 128) / fade_samples);
@@ -421,15 +418,25 @@ task_cleanup:
         /* Fade-out from 128 to 0 to gracefully discharge the AC cap */
         size_t fade_samples = (dac_rate * 20) / 1000;
         fade_samples = (fade_samples + 3) & ~3; /* Force 4-byte alignment */
-        uint8_t *fade_buf = (uint8_t *)heap_caps_malloc(fade_samples, MALLOC_CAP_INTERNAL);
-        if (fade_buf) {
-            for (size_t i = 0; i < fade_samples; i++) {
-                fade_buf[i] = (uint8_t)(128 - ((i * 128) / fade_samples));
-            }
-            size_t w;
-            dac_continuous_write(s_dac_cont, fade_buf, fade_samples, &w, pdMS_TO_TICKS(200));
-            free(fade_buf);
+        
+        /* Cap to STREAM_BUF_BYTES sanity check */
+        if (fade_samples > STREAM_BUF_BYTES) fade_samples = STREAM_BUF_BYTES;
+        
+        /* Reuse the main 'buf' to avoid memory allocation during cleanup
+         * and guarantee 8-bit accessible DRAM. */
+        for (size_t i = 0; i < fade_samples; i++) {
+            buf[i] = (uint8_t)(128 - ((i * 128) / fade_samples));
         }
+        
+        size_t w;
+        dac_continuous_write(s_dac_cont, buf, fade_samples, &w, pdMS_TO_TICKS(200));
+        
+        /* Wait briefly for DMA to physically output the fade buffer */
+        vTaskDelay(pdMS_TO_TICKS(30));
+    }
+    
+    free(buf);
+    dac_cont_stop();
         
         /* Wait briefly for DMA to physically output the fade buffer */
         vTaskDelay(pdMS_TO_TICKS(30));
