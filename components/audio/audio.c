@@ -45,7 +45,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include <strings.h>    /* strcasecmp */
+#include <strings.h>
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include <math.h>
@@ -58,10 +58,11 @@ static volatile bool     s_stop_flag   = false;
 static TaskHandle_t      s_audio_task  = NULL;
 static SemaphoreHandle_t s_play_mutex  = NULL;
 
-/* DAC handle */
+/* DAC handle - Always On */
 static dac_continuous_handle_t s_dac_cont = NULL;
 
 /* ── Buffer / DMA sizes ─────────────────────────────────────────────── */
+#define FIXED_DAC_RATE     32000
 #define STREAM_BUF_BYTES   4096   /* file read chunk; also 8-bit output buf */
 #define DAC_DESC_NUM          8   /* DMA descriptor count                   */
 #define DAC_DMA_BUF_SIZE   2048   /* bytes per DMA descriptor               */
@@ -81,84 +82,6 @@ typedef struct __attribute__((packed)) {
     uint16_t bits_per_sample;   /* 8 or 16            */
 } wav_riff_hdr_t;
 
-/* ── DAC lifecycle helpers ──────────────────────────────────────────── */
-
-/*
- * Transition from idle (oneshot at 128) to continuous mode.
- *
- * The ring is primed with one full descriptor of 128 (mid-rail silence)
- * before this function returns.  The hardware begins outputting 128
- * immediately — matching the oneshot level — so V_cap stays at 0 and
- * the amplifier input sees no voltage step.  Audio data queued by the
- * caller immediately follows the prime in the ring.
- */
-static esp_err_t dac_cont_start(uint32_t sample_rate)
-{
-    if (s_dac_cont) {
-        dac_continuous_disable(s_dac_cont);
-        dac_continuous_del_channels(s_dac_cont);
-        s_dac_cont = NULL;
-    }
-
-    dac_continuous_config_t cfg = {
-        .chan_mask = DAC_CHANNEL_MASK_CH0,
-        .desc_num  = DAC_DESC_NUM,
-        .buf_size  = DAC_DMA_BUF_SIZE,
-        .freq_hz   = sample_rate,
-        .clk_src   = DAC_DIGI_CLK_SRC_DEFAULT,
-        .chan_mode = DAC_CHANNEL_MODE_SIMUL,
-    };
-    
-    esp_err_t err = dac_continuous_new_channels(&cfg, &s_dac_cont);
-    if (err != ESP_OK) return err;
-
-    /* Prepare the fade-in buffer BEFORE enabling the DAC to prevent 
-     * a momentary 0V gap. We use a 40ms mathematical S-Curve. */
-    size_t fade_samples = (sample_rate * 40) / 1000; 
-    fade_samples = (fade_samples + 3) & ~3; /* Force 4-byte alignment */
-    
-    uint8_t *fade_buf = (uint8_t *)calloc(1, fade_samples);
-    if (fade_buf) {
-        for (size_t i = 0; i < fade_samples; i++) {
-            float t = (float)i / (float)fade_samples;
-            /* Smooth Cosine S-Curve from 0 to 128 */
-            fade_buf[i] = (uint8_t)(64.0f * (1.0f - cosf(t * (float)M_PI)));
-        }
-    }
-
-    /* Enable hardware and instantly write the fade buffer */
-    err = dac_continuous_enable(s_dac_cont);
-    if (err != ESP_OK) {
-        if (fade_buf) free(fade_buf);
-        dac_continuous_del_channels(s_dac_cont);
-        s_dac_cont = NULL;
-        return err;
-    }
-
-    if (fade_buf) {
-        size_t w;
-        dac_continuous_write(s_dac_cont, fade_buf, fade_samples, &w, pdMS_TO_TICKS(200));
-        free(fade_buf);
-    }
-
-    return ESP_OK;
-}
-
-static void dac_cont_stop(void)
-{
-    if (s_dac_cont) {
-        dac_continuous_disable(s_dac_cont);
-        dac_continuous_del_channels(s_dac_cont);
-        s_dac_cont = NULL;
-    }
-    
-    /* Drive pin LOW (0V) instead of Hi-Z. 
-     * This provides a low-impedance path to ground that rejects 
-     * WS2812/WiFi EMI crosstalk, killing the static floor. */
-    gpio_reset_pin(PIN_AUDIO_DAC);
-    gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_OUTPUT);
-    gpio_set_level(PIN_AUDIO_DAC, 0);
-}
 
 /* ── Volume scaling ─────────────────────────────────────────────────── */
 static void apply_volume(uint8_t *buf, int len_bytes,
@@ -198,41 +121,19 @@ static void audio_play_task(void *arg)
     path[sizeof(path) - 1] = '\0';
     free(a);
 
-    ESP_LOGI(TAG, "task start: internal_free=%u  total_free=%u  stack_hwm=%u",
-             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-             (unsigned)esp_get_free_heap_size(),
-             (unsigned)uxTaskGetStackHighWaterMark(NULL));
-
     uint8_t *buf     = NULL;
     uint8_t *preload = NULL;
     size_t   preload_n = 0;
-    uint32_t frame = 0, write_stalls = 0, total_bytes_out = 0;
-    uint32_t dac_rate = 32000;   /* set properly after header parse */
+    uint32_t frame = 0, total_bytes_out = 0;
 
-    /* ── Open file ── */
     FILE *f = fopen(path, "rb");
-    if (!f) {
-        ESP_LOGE(TAG, "Cannot open audio file: %s", path);
-        goto task_exit;
-    }
+    if (!f) goto task_exit;
 
-    /* ── Parse RIFF/WAVE header ── */
     wav_riff_hdr_t hdr;
-    if (fread(&hdr, 1, sizeof(hdr), f) < (int)sizeof(hdr)) {
-        ESP_LOGE(TAG, "Short read on WAV header: %s", path);
-        goto task_close;
-    }
-    if (memcmp(hdr.riff_id, "RIFF", 4) != 0 ||
-        memcmp(hdr.wave_id, "WAVE", 4) != 0) {
-        ESP_LOGE(TAG, "Not a WAV file: %s", path);
-        goto task_close;
-    }
-    if (hdr.audio_format != 1) {
-        ESP_LOGE(TAG, "Only PCM WAV supported (format=%u)", hdr.audio_format);
-        goto task_close;
-    }
+    if (fread(&hdr, 1, sizeof(hdr), f) < (int)sizeof(hdr)) goto task_close;
+    if (memcmp(hdr.riff_id, "RIFF", 4) != 0 || memcmp(hdr.wave_id, "WAVE", 4) != 0) goto task_close;
+    if (hdr.audio_format != 1) goto task_close;
 
-    /* ── Find the 'data' sub-chunk ── */
     {
         long data_start = -1;
         fseek(f, 12, SEEK_SET);
@@ -244,33 +145,22 @@ static void audio_play_task(void *arg)
             if (memcmp(cid, "data", 4) == 0) { data_start = ftell(f); break; }
             fseek(f, (long)(csz + (csz & 1)), SEEK_CUR);
         }
-        if (data_start < 0) {
-            ESP_LOGE(TAG, "No 'data' chunk in: %s", path);
-            goto task_close;
-        }
+        if (data_start < 0) goto task_close;
         fseek(f, data_start, SEEK_SET);
     }
-
-    ESP_LOGI(TAG, "WAV play: %s  %u Hz  %u ch  %u-bit  vol=%d%%",
-             path, (unsigned)hdr.sample_rate, hdr.num_channels,
-             hdr.bits_per_sample, s_volume);
 
     /* ── Upsample factor for low sample-rate files ─────────────────────
      * ESP32 DAC DMA minimum rate ≈ 19 608 Hz (160 MHz / (255 × 32)).
      * 8 kHz and 16 kHz files are integer-upsampled to ≥ 20 kHz. */
     uint32_t upsample = 1;
-    dac_rate = hdr.sample_rate;
-    while (dac_rate < 20000) { upsample <<= 1; dac_rate <<= 1; }
-    if (upsample > 1)
-        ESP_LOGI(TAG, "Upsampling x%u: %u Hz → %u Hz",
-                 (unsigned)upsample, (unsigned)hdr.sample_rate, (unsigned)dac_rate);
+    if (hdr.sample_rate > 0 && FIXED_DAC_RATE >= hdr.sample_rate) {
+        upsample = FIXED_DAC_RATE / hdr.sample_rate;
+    }
+    if (upsample < 1) upsample = 1;
 
     /* ── DMA window: internal SRAM ── */
     buf = (uint8_t *)heap_caps_malloc(STREAM_BUF_BYTES, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
-    if (!buf) {
-        ESP_LOGE(TAG, "OOM for DMA window");
-        goto task_cleanup;
-    }
+    if (!buf) goto task_cleanup;
 
     /* ── PSRAM pre-buffer ───────────────────────────────────────────────
      * Load the entire WAV data chunk into PSRAM before starting the DAC.
@@ -291,16 +181,11 @@ static void audio_play_task(void *arg)
 
             preload = (uint8_t *)heap_caps_malloc(alloc_size, MALLOC_CAP_SPIRAM);
             if (preload) {
-                int64_t t_load = esp_timer_get_time();
-                size_t  got    = fread(preload, 1, raw_bytes, f);
-                ESP_LOGI(TAG, "PSRAM pre-load: %zu bytes in %lld ms",
-                         got, (long long)((esp_timer_get_time() - t_load) / 1000));
-
+                size_t got = fread(preload, 1, raw_bytes, f);
                 apply_volume(preload, (int)got, hdr.bits_per_sample, s_volume);
 
                 int out8 = (int)got;
-                if (hdr.bits_per_sample == 16)
-                    out8 = pcm16_to_pcm8(preload, (int)got);
+                if (hdr.bits_per_sample == 16) out8 = pcm16_to_pcm8(preload, (int)got);
 
                 if (upsample > 1) {
                     for (int i = out8 - 1; i >= 0; i--) {
@@ -311,8 +196,6 @@ static void audio_play_task(void *arg)
                     out8 *= (int)upsample;
                 }
                 preload_n = (size_t)out8;
-            } else {
-                ESP_LOGW(TAG, "PSRAM OOM (%zu bytes) — streaming", alloc_size);
             }
         }
     }
@@ -322,14 +205,8 @@ static void audio_play_task(void *arg)
      * Pausing RMT stops all transmissions; LEDs hold their last colour. */
     leds_set_audio_active(true);
 
-    /* ── Start DAC continuous (oneshot → continuous + prime ring) ── */
-    if (dac_cont_start(dac_rate) != ESP_OK)
-        goto task_cleanup;
-
-    /* ── Stream PCM to DMA ── */
+    /* Stream PCM to the perpetually running DMA */
     {
-        int64_t t_start = esp_timer_get_time();
-
         if (preload) {
             /* PSRAM path */
             size_t pos = 0;
@@ -344,16 +221,9 @@ static void audio_play_task(void *arg)
                 pos += chunk;
 
                 size_t written = 0;
-                int64_t t_wr = esp_timer_get_time();
                 esp_err_t werr = dac_continuous_write(s_dac_cont, buf, chunk,
                                                       &written, pdMS_TO_TICKS(1000));
-                int64_t wr_us = esp_timer_get_time() - t_wr;
-                if (wr_us > 700000) {
-                    write_stalls++;
-                }
-                if (werr != ESP_OK) {
-                    break;
-                }
+                if (werr != ESP_OK) break;
                 total_bytes_out += (uint32_t)written;
                 frame++;
             }
@@ -369,8 +239,7 @@ static void audio_play_task(void *arg)
                 apply_volume(buf, rd, hdr.bits_per_sample, s_volume);
 
                 int out_bytes = rd;
-                if (hdr.bits_per_sample == 16)
-                    out_bytes = pcm16_to_pcm8(buf, rd);
+                if (hdr.bits_per_sample == 16) out_bytes = pcm16_to_pcm8(buf, rd);
 
                 if (upsample > 1) {
                     for (int i = out_bytes - 1; i >= 0; i--) {
@@ -388,158 +257,101 @@ static void audio_play_task(void *arg)
                 esp_err_t werr = dac_continuous_write(s_dac_cont, buf,
                                                       (size_t)out_bytes,
                                                       &written, pdMS_TO_TICKS(1000));
-                if (werr != ESP_OK) {
-                    break;
-                }
+                if (werr != ESP_OK) break;
                 total_bytes_out += (uint32_t)written;
                 frame++;
             }
         }
-
-        ESP_LOGI(TAG, "playback done: %u frames  %u bytes  %lld ms  %u stalls",
-                 frame, total_bytes_out,
-                 (long long)((esp_timer_get_time() - t_start) / 1000),
-                 write_stalls);
     }
 
 task_cleanup:
     if (preload) { free(preload); preload = NULL; }
 
     if (buf && s_dac_cont) {
-        size_t fade_samples = (dac_rate * 40) / 1000;
-        fade_samples = (fade_samples + 3) & ~3;
-        
-        if (fade_samples > STREAM_BUF_BYTES) fade_samples = STREAM_BUF_BYTES;
-        
-        for (size_t i = 0; i < fade_samples; i++) {
-            float t = (float)i / (float)fade_samples;
-            /* Smooth Cosine S-Curve from 128 down to 0 */
-            buf[i] = (uint8_t)(64.0f * (1.0f + cosf(t * (float)M_PI)));
-        }
-        
+        /* Flush ring with pure silence (128) to safely drain audio 
+         * and leave the DMA perfectly resting at mid-rail. */
+        memset(buf, 128, STREAM_BUF_BYTES);
         size_t w;
-        dac_continuous_write(s_dac_cont, buf, fade_samples, &w, pdMS_TO_TICKS(200));
-        
-        /* WE MUST WAIT FOR THE DMA RING TO COMPLETELY DRAIN!
-         * If we shut the DAC off prematurely, it cuts the sound mid-wave 
-         * and causes a massive pop. We calculate the exact milliseconds needed. */
-        uint32_t ring_bytes = DAC_DESC_NUM * DAC_DMA_BUF_SIZE;
-        uint32_t pending_bytes = total_bytes_out + fade_samples;
-        uint32_t bytes_to_drain = (pending_bytes < ring_bytes) ? pending_bytes : ring_bytes;
-        uint32_t drain_time_ms = (bytes_to_drain * 1000) / dac_rate;
-        
-        vTaskDelay(pdMS_TO_TICKS(drain_time_ms + 50)); 
+        for (int i = 0; i < DAC_DESC_NUM; i++) {
+            dac_continuous_write(s_dac_cont, buf, DAC_DMA_BUF_SIZE, &w, pdMS_TO_TICKS(200));
+        }
     }
     
     free(buf);
-    dac_cont_stop();
-
     leds_set_audio_active(false);
 
 task_close:
     fclose(f);
 task_exit:
-    ESP_LOGI(TAG, "task exit: stack_hwm=%u  internal_free=%u",
-             (unsigned)uxTaskGetStackHighWaterMark(NULL),
-             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     xSemaphoreGive(s_play_mutex);
     s_audio_task = NULL;
     vTaskDelete(NULL);
 }
 
 /* ════════════════════════════════════════════════════════════════════ */
-/*  Public API                                                          */
+/* Public API                                                          */
 /* ════════════════════════════════════════════════════════════════════ */
 
 void audio_init(void)
 {
     esp_log_level_set(TAG, ESP_LOG_INFO);
-    ESP_LOGI(TAG, "Audio init – DAC GPIO%d", PIN_AUDIO_DAC);
+    ESP_LOGI(TAG, "Audio init – DAC Always-On (32kHz)");
 
-    /* Idle with DAC completely off — GPIO25 Hi-Z (input).
-     *
-     * With the DAC analog output buffer powered down, WS2812 current
-     * spikes on the shared 3.3 V rail have no path through the DAC
-     * buffer into the LTK8002D amplifier.  The amp's internal bias
-     * resistors hold its input at VDD/2 through the AC coupling cap,
-     * so the amp output is silent.
-     *
-     * dac_cont_start() reconfigures GPIO25 for DAC use and primes the
-     * DMA ring with 128 (VDD/2) before writing audio.  V_cap = 0 at
-     * idle (both sides of the cap at VDD/2), so the first DAC sample
-     * at 128 creates no voltage step — no pop. */
-    gpio_reset_pin(PIN_AUDIO_DAC);
-    gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_OUTPUT);
-    gpio_set_level(PIN_AUDIO_DAC, 0);
-
-    /* Binary semaphore – cross-task give/take pattern (play_file takes
-     * in caller's task, play_task gives on exit). */
     s_play_mutex = xSemaphoreCreateBinary();
     xSemaphoreGive(s_play_mutex);
 
-    /* ── DAC warm-up ────────────────────────────────────────────────────
-     * The first call to dac_continuous_new_channels() + enable() pays a
-     * one-time cost: I2S peripheral reset, APLL lock, DMA init (~1.5 s
-     * on ESP32).  Doing a dummy start/stop here at boot hides that cost
-     * at startup (silent, inaudible) rather than on the first button press
-     * where it would delay audio and cause a prolonged DMA write stall. */
-    ESP_LOGI(TAG, "DAC warm-up...");
-    dac_continuous_handle_t warmup = NULL;
-    dac_continuous_config_t wcfg = {
+    dac_continuous_config_t cfg = {
         .chan_mask = DAC_CHANNEL_MASK_CH0,
-        .desc_num  = 2,
-        .buf_size  = 512,
-        .freq_hz   = 32000,
+        .desc_num  = DAC_DESC_NUM,
+        .buf_size  = DAC_DMA_BUF_SIZE,
+        .freq_hz   = FIXED_DAC_RATE,
         .clk_src   = DAC_DIGI_CLK_SRC_DEFAULT,
         .chan_mode = DAC_CHANNEL_MODE_SIMUL,
     };
-    if (dac_continuous_new_channels(&wcfg, &warmup) == ESP_OK) {
-        if (dac_continuous_enable(warmup) == ESP_OK) {
-            uint8_t silence[512];
-            memset(silence, 128, sizeof(silence));
+    
+    if (dac_continuous_new_channels(&cfg, &s_dac_cont) == ESP_OK) {
+        dac_continuous_enable(s_dac_cont);
+        
+        /* Anti-Pop Boot Fade: Smoothly shift the DC bias from 0V to 1.65V
+         * over 500ms using a sub-audible 1Hz S-Curve. */
+        size_t fade_samples = (FIXED_DAC_RATE * 500) / 1000;
+        fade_samples = (fade_samples + 3) & ~3;
+        
+        uint8_t *boot_fade = (uint8_t *)calloc(1, fade_samples);
+        if (boot_fade) {
+            for (size_t i = 0; i < fade_samples; i++) {
+                float t = (float)i / (float)fade_samples;
+                boot_fade[i] = (uint8_t)(64.0f * (1.0f - cosf(t * (float)M_PI)));
+            }
             size_t w;
-            dac_continuous_write(warmup, silence, sizeof(silence), &w, pdMS_TO_TICKS(2000));
-            dac_continuous_disable(warmup);
+            dac_continuous_write(s_dac_cont, boot_fade, fade_samples, &w, portMAX_DELAY);
+            free(boot_fade);
         }
-        dac_continuous_del_channels(warmup);
+        
+        /* Pre-fill the rest of the DMA ring with silence */
+        uint8_t silence[DAC_DMA_BUF_SIZE];
+        memset(silence, 128, sizeof(silence));
+        size_t w;
+        for (int i = 0; i < DAC_DESC_NUM; i++) {
+            dac_continuous_write(s_dac_cont, silence, sizeof(silence), &w, portMAX_DELAY);
+        }
     }
-    /* Return GPIO25 to actively driven LOW after warm-up */
-    gpio_reset_pin(PIN_AUDIO_DAC);
-    gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_OUTPUT);
-    gpio_set_level(PIN_AUDIO_DAC, 0);
-    ESP_LOGI(TAG, "DAC warm-up done");
 }
 
 void audio_play_file(const char *path)
 {
-    if (!path || path[0] == '\0') {
-        ESP_LOGW(TAG, "audio_play_file: empty path — ignoring");
-        return;
-    }
-    ESP_LOGI(TAG, "audio_play_file: %s", path);
+    if (!path || path[0] == '\0') return;
 
     const char *ext = strrchr(path, '.');
-    if (!ext || strcasecmp(ext, ".wav") != 0) {
-        ESP_LOGW(TAG, "Skipping non-WAV file: %s", path);
-        return;
-    }
+    if (!ext || strcasecmp(ext, ".wav") != 0) return;
 
-    if (!s_play_mutex) {
-        ESP_LOGE(TAG, "audio_play_file: mutex NULL — audio_init() not called?");
-        return;
-    }
+    if (!s_play_mutex) return;
 
-    /* Orphaned-mutex recovery */
     if (s_audio_task == NULL && uxSemaphoreGetCount(s_play_mutex) == 0) {
-        ESP_LOGW(TAG, "Orphaned play mutex — force-releasing");
         xSemaphoreGive(s_play_mutex);
     }
 
-    /* Non-blocking drop if already playing */
-    if (xSemaphoreTake(s_play_mutex, 0) != pdTRUE) {
-        ESP_LOGW(TAG, "audio busy — dropping %s", path);
-        return;
-    }
+    if (xSemaphoreTake(s_play_mutex, 0) != pdTRUE) return;
 
     s_stop_flag = false;
 
@@ -548,10 +360,7 @@ void audio_play_file(const char *path)
     strncpy(a->path, path, sizeof(a->path) - 1);
     a->path[sizeof(a->path) - 1] = '\0';
 
-    BaseType_t rc = xTaskCreate(audio_play_task, "audio_play",
-                                16384, a, 5, &s_audio_task);
-    if (rc != pdPASS) {
-        ESP_LOGE(TAG, "Failed to create audio_play task");
+    if (xTaskCreate(audio_play_task, "audio_play", 16384, a, 5, &s_audio_task) != pdPASS) {
         free(a);
         xSemaphoreGive(s_play_mutex);
     }
@@ -562,18 +371,12 @@ void audio_set_volume(int vol)
     if (vol < 0)   vol = 0;
     if (vol > 100) vol = 100;
     s_volume = vol;
-    ESP_LOGD(TAG, "Volume set to %d%%", s_volume);
 }
 
 void audio_stop(void)
 {
     s_stop_flag = true;
-    for (int i = 0; i < 30 && s_audio_task != NULL; i++)
+    for (int i = 0; i < 30 && s_audio_task != NULL; i++) {
         vTaskDelay(pdMS_TO_TICKS(10));
-        
-    if (s_audio_task == NULL && !s_dac_cont) {
-        gpio_reset_pin(PIN_AUDIO_DAC);
-        gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_OUTPUT);
-        gpio_set_level(PIN_AUDIO_DAC, 0);
     }
 }
