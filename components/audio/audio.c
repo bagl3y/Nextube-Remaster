@@ -38,7 +38,6 @@
 #include "board_pins.h"
 #include "esp_log.h"
 #include "driver/dac_continuous.h"
-#include "driver/dac_oneshot.h"
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -59,9 +58,8 @@ static volatile bool     s_stop_flag   = false;
 static TaskHandle_t      s_audio_task  = NULL;
 static SemaphoreHandle_t s_play_mutex  = NULL;
 
-/* DAC handles – only one active at a time */
-static dac_continuous_handle_t s_dac_cont = NULL;   /* during playback */
-static dac_oneshot_handle_t    s_dac_one  = NULL;   /* during idle     */
+/* DAC handle */
+static dac_continuous_handle_t s_dac_cont = NULL;
 
 /* ── Buffer / DMA sizes ─────────────────────────────────────────────── */
 #define STREAM_BUF_BYTES   4096   /* file read chunk; also 8-bit output buf */
@@ -108,8 +106,8 @@ static esp_err_t dac_cont_start(uint32_t sample_rate)
         .buf_size  = DAC_DMA_BUF_SIZE,
         .freq_hz   = sample_rate,
         .clk_src   = DAC_DIGI_CLK_SRC_DEFAULT,
-        .chan_mode  = DAC_CHANNEL_MODE_SIMUL,
     };
+    
     esp_err_t err = dac_continuous_new_channels(&cfg, &s_dac_cont);
     if (err != ESP_OK) return err;
 
@@ -120,6 +118,12 @@ static esp_err_t dac_cont_start(uint32_t sample_rate)
         return err;
     }
 
+    /* Smooth fade-in from 0 to 128 (VDD/2). 
+     * The DMA buffer initializes at 0, which perfectly matches our 
+     * driven-ground idle state. We smoothly charge the AC cap over 20ms. */
+    size_t fade_samples = (sample_rate * 20) / 1000; 
+    fade_samples = (fade_samples + 3) & ~3; /* Force 4-byte alignment */
+    
     /* Use standard calloc to guarantee 8-bit accessible DRAM. */
     uint8_t *fade_buf = (uint8_t *)calloc(1, fade_samples);
     if (fade_buf) {
@@ -256,8 +260,7 @@ static void audio_play_task(void *arg)
                  (unsigned)upsample, (unsigned)hdr.sample_rate, (unsigned)dac_rate);
 
     /* ── DMA window: internal SRAM ── */
-    buf = (uint8_t *)heap_caps_malloc(STREAM_BUF_BYTES,
-                                      MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    buf = (uint8_t *)heap_caps_malloc(STREAM_BUF_BYTES, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
     if (!buf) {
         ESP_LOGE(TAG, "OOM for DMA window");
         goto task_cleanup;
@@ -330,7 +333,7 @@ static void audio_play_task(void *arg)
                 
                 chunk &= ~3; 
                 if (chunk == 0) break;
-                
+
                 memcpy(buf, preload + pos, chunk);
                 pos += chunk;
 
@@ -341,11 +344,8 @@ static void audio_play_task(void *arg)
                 int64_t wr_us = esp_timer_get_time() - t_wr;
                 if (wr_us > 700000) {
                     write_stalls++;
-                    ESP_LOGW(TAG, "DAC write stall: %lld ms (frame %u)",
-                             (long long)(wr_us / 1000), frame);
                 }
                 if (werr != ESP_OK) {
-                    ESP_LOGW(TAG, "DAC write error %s", esp_err_to_name(werr));
                     break;
                 }
                 total_bytes_out += (uint32_t)written;
@@ -357,13 +357,8 @@ static void audio_play_task(void *arg)
             /* SPIFFS streaming fallback */
             const size_t read_size = STREAM_BUF_BYTES / upsample;
             while (!s_stop_flag) {
-                int64_t t_rd = esp_timer_get_time();
                 int rd = (int)fread(buf, 1, read_size, f);
-                int64_t rd_us = esp_timer_get_time() - t_rd;
                 if (rd <= 0) break;
-                if (rd_us > 250000)
-                    ESP_LOGW(TAG, "fread slow: %lld ms (frame %u)",
-                             (long long)(rd_us / 1000), frame);
 
                 apply_volume(buf, rd, hdr.bits_per_sample, s_volume);
 
@@ -384,20 +379,10 @@ static void audio_play_task(void *arg)
                 if (out_bytes == 0) break;
 
                 size_t written = 0;
-                int64_t t_wr = esp_timer_get_time();
                 esp_err_t werr = dac_continuous_write(s_dac_cont, buf,
                                                       (size_t)out_bytes,
                                                       &written, pdMS_TO_TICKS(1000));
-                int64_t wr_us = esp_timer_get_time() - t_wr;
-                if (wr_us > 700000) {
-                    write_stalls++;
-                    ESP_LOGW(TAG, "DAC write stall: %lld ms (frame %u, written=%u/%d)",
-                             (long long)(wr_us / 1000), frame,
-                             (unsigned)written, out_bytes);
-                }
                 if (werr != ESP_OK) {
-                    ESP_LOGW(TAG, "DAC write error %s — stopping",
-                             esp_err_to_name(werr));
                     break;
                 }
                 total_bytes_out += (uint32_t)written;
@@ -435,12 +420,6 @@ task_cleanup:
         vTaskDelay(pdMS_TO_TICKS(30));
     }
     
-    free(buf);
-    dac_cont_stop();
-        
-        /* Wait briefly for DMA to physically output the fade buffer */
-        vTaskDelay(pdMS_TO_TICKS(30));
-    }
     free(buf);
     dac_cont_stop();
 
@@ -502,7 +481,7 @@ void audio_init(void)
         .buf_size  = 512,
         .freq_hz   = 32000,
         .clk_src   = DAC_DIGI_CLK_SRC_DEFAULT,
-        .chan_mode  = DAC_CHANNEL_MODE_SIMUL,
+        .chan_mode = DAC_CHANNEL_MODE_SIMUL,
     };
     if (dac_continuous_new_channels(&wcfg, &warmup) == ESP_OK) {
         if (dac_continuous_enable(warmup) == ESP_OK) {
@@ -581,7 +560,10 @@ void audio_stop(void)
     s_stop_flag = true;
     for (int i = 0; i < 30 && s_audio_task != NULL; i++)
         vTaskDelay(pdMS_TO_TICKS(10));
-    /* Ensure DAC is off if task exited without reaching dac_cont_stop() */
-    if (s_audio_task == NULL && !s_dac_cont && !s_dac_one)
-        gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_INPUT);
+        
+    if (s_audio_task == NULL && !s_dac_cont) {
+        gpio_reset_pin(PIN_AUDIO_DAC);
+        gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_OUTPUT);
+        gpio_set_level(PIN_AUDIO_DAC, 0);
+    }
 }
