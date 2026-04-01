@@ -21,17 +21,16 @@
  *             The amp's internal bias resistors hold its input at VDD/2
  *             through the AC cap; V_cap = 0.
  *
- *   playing – GPIO25 reclaimed by dac_continuous_new_channels().
- *             The DMA ring is primed with a 64-sample 0→128 ramp followed
- *             by flat 128 (mid-rail silence) before audio data is written.
- *             The ramp starts at 0, matching the DMA ring's zero-init, so
- *             there is no discontinuity.  It rises to 128 over ~2 ms and
- *             audio (also near 128 for a silent-start WAV) follows without
- *             a voltage step — V_cap = 0 throughout — no pop/chirp.
- *             WS2812 RMT is paused via leds_set_audio_active(true) for the
- *             duration of playback to prevent rail-noise coupling.
- *             On exit, the ring is flushed with 128 silence, DAC is stopped,
- *             GPIO25 returns to Hi-Z, and LEDs resume.
+ *   playing – leds_set_audio_active(true) pauses WS2812 RMT first.
+ *             A 15 ms oneshot-at-128 pre-charges the AC cap to V_cap = 0
+ *             while the rail is quiet.  GPIO25 is then reclaimed by
+ *             dac_continuous_new_channels().  A flat-128 prime buffer
+ *             (pre-filled before enable) is written immediately after
+ *             dac_continuous_enable() to minimise the DMA zero-init
+ *             window.  With V_cap = 0 and DAC at 128, V_amp_in = VDD/2
+ *             = silence throughout the transition — no pop, no chirp.
+ *             On exit the ring is flushed with 128, DAC stopped, GPIO25
+ *             returns to Hi-Z, and LEDs resume.
  */
 
 #include "audio.h"
@@ -110,6 +109,40 @@ static esp_err_t dac_cont_start(uint32_t sample_rate)
         s_dac_cont = NULL;
     }
 
+    /* ── Step 1: Pre-fill the prime buffer before touching the DAC ──────
+     * Allocating memory between dac_continuous_enable() and the first
+     * dac_continuous_write() extends the window during which the DMA
+     * ring outputs its zero-initialised content.  Do the allocation and
+     * fill now so the write can follow enable with minimal delay. */
+    uint8_t *prime = (uint8_t *)heap_caps_malloc(DAC_DMA_BUF_SIZE,
+                                                  MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    if (prime)
+        memset(prime, 128, DAC_DMA_BUF_SIZE);   /* flat mid-rail silence */
+
+    /* ── Step 2: Pre-charge the AC-coupling cap via oneshot at 128 ──────
+     *
+     * At Hi-Z idle both sides of the AC cap settle to VDD/2 through the
+     * amp's bias resistors, giving V_cap = 0.  After a long idle this
+     * is already true, but if the previous sound left V_cap at a non-zero
+     * residual the oneshot corrects it.
+     *
+     * The WS2812 RMT is already paused (leds_set_audio_active(true) was
+     * called before this function), so there is no rail-noise coupling
+     * through the DAC buffer during this window.
+     *
+     * 15 ms covers > 1 RC time constant for coupling caps with a 100 Hz
+     * cut-off (RC = 1.6 ms) and > 1.5 RC at 20 Hz (RC = 8 ms).         */
+    {
+        dac_oneshot_handle_t     precharge = NULL;
+        dac_oneshot_config_t     one_cfg   = { .chan_id = DAC_CHAN_0 };
+        if (dac_oneshot_new_channel(&one_cfg, &precharge) == ESP_OK) {
+            dac_oneshot_output_voltage(precharge, 128);
+            vTaskDelay(pdMS_TO_TICKS(15));
+            dac_oneshot_del_channel(precharge);
+        }
+    }
+
+    /* ── Step 3: Create and enable the continuous channel ─────────────── */
     dac_continuous_config_t cfg = {
         .chan_mask = DAC_CHANNEL_MASK_CH0,
         .desc_num  = DAC_DESC_NUM,
@@ -132,38 +165,26 @@ static esp_err_t dac_cont_start(uint32_t sample_rate)
         goto fail_restore_hiz;
     }
 
-    /* Prime the ring with a short 0→128 ramp followed by flat silence.
+    /* ── Step 4: Write prime immediately after enable ───────────────────
      *
-     * At idle, GPIO25 is Hi-Z and the AC-coupling cap settles to V_cap = 0
-     * (both sides at VDD/2 via the amp's internal bias resistors).  The
-     * DMA ring is zero-initialised, so the first bytes output by the
-     * hardware are 0 — which with V_cap = 0 means V_amp_in = 0 (ground).
-     * The ramp starts at 0, matching that zero-init, so there is no
-     * discontinuity.  It rises to 128 (VDD/2) over DAC_PRIME_RAMP_SAMPLES,
-     * after which audio data (also near 128 for a silent-start WAV) follows
-     * without a voltage step.
+     * The DMA ring is zero-initialised.  With V_cap = 0 from the oneshot
+     * pre-charge, any brief zero-output before our write lands would
+     * produce V_amp_in = 0 (ground).  Writing 128 as fast as possible
+     * (buffer is already filled) minimises that window.
      *
-     * Ramp duration: 64 samples at 32 kHz = 2 ms.  This is short enough
-     * to be perceived as a soft transient onset rather than a tonal chirp,
-     * and is completely masked by the click sound's own attack. */
-#define DAC_PRIME_RAMP_SAMPLES 64
-    {
-        uint8_t *prime = (uint8_t *)heap_caps_malloc(DAC_DMA_BUF_SIZE,
-                                                     MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
-        if (prime) {
-            for (size_t i = 0; i < DAC_PRIME_RAMP_SAMPLES; i++)
-                prime[i] = (uint8_t)(128 * i / (DAC_PRIME_RAMP_SAMPLES - 1));
-            memset(prime + DAC_PRIME_RAMP_SAMPLES, 128,
-                   DAC_DMA_BUF_SIZE - DAC_PRIME_RAMP_SAMPLES);
-            size_t w;
-            dac_continuous_write(s_dac_cont, prime, DAC_DMA_BUF_SIZE,
-                                 &w, pdMS_TO_TICKS(200));
-            free(prime);
-        }
+     * Once the prime lands, V_DAC = 128 = VDD/2 → V_amp_in = VDD/2 = silence.
+     * Audio data follows without a voltage step — no pop, no chirp.      */
+    if (prime) {
+        size_t w;
+        dac_continuous_write(s_dac_cont, prime, DAC_DMA_BUF_SIZE,
+                             &w, pdMS_TO_TICKS(200));
+        free(prime);
+        prime = NULL;
     }
     return ESP_OK;
 
 fail_restore_hiz:
+    free(prime);
     gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_INPUT);
     return err;
 }
@@ -511,6 +532,37 @@ void audio_init(void)
      * in caller's task, play_task gives on exit). */
     s_play_mutex = xSemaphoreCreateBinary();
     xSemaphoreGive(s_play_mutex);
+
+    /* ── DAC warm-up ────────────────────────────────────────────────────
+     * The first call to dac_continuous_new_channels() + enable() pays a
+     * one-time cost: I2S peripheral reset, APLL lock, DMA init (~1.5 s
+     * on ESP32).  Doing a dummy start/stop here at boot hides that cost
+     * at startup (silent, inaudible) rather than on the first button press
+     * where it would delay audio and cause a prolonged DMA write stall. */
+    ESP_LOGI(TAG, "DAC warm-up...");
+    dac_continuous_handle_t warmup = NULL;
+    dac_continuous_config_t wcfg = {
+        .chan_mask = DAC_CHANNEL_MASK_CH0,
+        .desc_num  = 2,
+        .buf_size  = 512,
+        .freq_hz   = 32000,
+        .clk_src   = DAC_DIGI_CLK_SRC_DEFAULT,
+        .chan_mode  = DAC_CHANNEL_MODE_SIMUL,
+    };
+    if (dac_continuous_new_channels(&wcfg, &warmup) == ESP_OK) {
+        if (dac_continuous_enable(warmup) == ESP_OK) {
+            uint8_t silence[512];
+            memset(silence, 128, sizeof(silence));
+            size_t w;
+            dac_continuous_write(warmup, silence, sizeof(silence), &w, pdMS_TO_TICKS(2000));
+            dac_continuous_disable(warmup);
+        }
+        dac_continuous_del_channels(warmup);
+    }
+    /* Return GPIO25 to Hi-Z after warm-up */
+    gpio_reset_pin(PIN_AUDIO_DAC);
+    gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_INPUT);
+    ESP_LOGI(TAG, "DAC warm-up done");
 }
 
 void audio_play_file(const char *path)
