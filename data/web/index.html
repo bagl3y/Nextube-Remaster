@@ -295,6 +295,12 @@ select option{background:var(--accent);color:var(--text)}
 <div class="tab-content" id="tab-audio">
   <div class="card">
     <h2>Audio Settings</h2>
+    <div class="field" style="padding-bottom:4px">
+      <div style="display:flex;align-items:center;gap:8px">
+        <input type="checkbox" id="f-audio-en" style="width:16px;height:16px;cursor:pointer">
+        <label for="f-audio-en" style="margin:0;cursor:pointer;font-weight:normal">Enable audio output</label>
+      </div>
+    </div>
     <div class="field meter"><label>Volume</label><input type="range" id="f-vol" min="0" max="100"><span id="v-vol">20</span>%</div>
     <div class="field"><label>Clock Music File</label>
       <div style="display:flex;gap:8px;align-items:center">
@@ -560,6 +566,7 @@ async function loadSettings() {
   $('f-timer').value = cfg.timer_file || '';
   $('f-click').value = cfg.click_file || '';
   $('f-btn-sound').checked = cfg.button_sound !== false;
+  $('f-audio-en').checked  = cfg.audio_enabled !== false;
   $('f-countdown').value  = cfg.default_countdown_time || 1;
   $('f-pomo-work').value  = cfg.pomodoro_work  || 25;
   $('f-pomo-break').value = cfg.pomodoro_break || 5;
@@ -670,7 +677,7 @@ async function saveSettings() {
     weather_source: $('f-wsrc').value, weather_api_key: $('f-wkey').value, City: $('f-city').value, temperature_formate: $('f-tempfmt').value,
     video_site: $('f-vsite').value, youtube_id: $('f-ytid').value, youtube_key: $('f-ytkey').value, bili_uid: $('f-buid').value,
     volume: +$('f-vol').value, music_file: $('f-music').value, bell_file: $('f-bell').value, tone_file: $('f-tone').value, timer_file: $('f-timer').value,
-    click_file: $('f-click').value, button_sound: $('f-btn-sound').checked,
+    click_file: $('f-click').value, button_sound: $('f-btn-sound').checked, audio_enabled: $('f-audio-en').checked,
     default_countdown_time: +$('f-countdown').value,
     pomodoro_work:  +$('f-pomo-work').value,
     pomodoro_break: +$('f-pomo-break').value,

@@ -174,7 +174,8 @@ void app_main(void)
     display_task_start();          /* launch 5 Hz FreeRTOS display task */
 
     audio_init();
-    audio_set_volume(cfg->volume); /* restore saved volume level */
+    audio_set_volume(cfg->volume);          /* restore saved volume level   */
+    audio_set_enabled(cfg->audio_enabled);  /* tear down DAC if disabled    */
 
     leds_init();
     leds_task_start();

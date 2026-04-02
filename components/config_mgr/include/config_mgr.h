@@ -79,6 +79,7 @@ typedef struct {
     char             timer_file[64];
     char             click_file[64];     /* sound played on physical button press */
     bool             button_sound;       /* enable/disable button click sound */
+    bool             audio_enabled;      /* false = DAC off, complete silence  */
     uint8_t          volume;             /* 0-100 */
 
     /* Countdown / Pomodoro */

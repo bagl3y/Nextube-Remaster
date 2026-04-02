@@ -64,7 +64,8 @@ static void set_defaults(void)
     strcpy(s_cfg.tone_file, "/spiffs/audio/tremolo3.wav");
     strcpy(s_cfg.timer_file, "/spiffs/audio/timer.wav");
     strcpy(s_cfg.click_file, "/spiffs/audio/click.wav");
-    s_cfg.button_sound = true;
+    s_cfg.button_sound  = true;
+    s_cfg.audio_enabled = true;
     s_cfg.volume = 20;
 
     s_cfg.countdown_minutes = 1;
@@ -160,6 +161,10 @@ static void parse_json(const char *json, size_t len)
     {
         cJSON *bs = cJSON_GetObjectItem(root, "button_sound");
         if (cJSON_IsBool(bs)) s_cfg.button_sound = cJSON_IsTrue(bs);
+    }
+    {
+        cJSON *ae = cJSON_GetObjectItem(root, "audio_enabled");
+        if (cJSON_IsBool(ae)) s_cfg.audio_enabled = cJSON_IsTrue(ae);
     }
 
     /* time_zone: new format = ±hours (|value| ≤ 24), legacy = raw seconds (|value| > 24).
@@ -367,6 +372,7 @@ char *config_to_json(void)
     cJSON_AddStringToObject(root, "ntp_server",      s_cfg.ntp_server);
     cJSON_AddStringToObject(root, "hostname",        s_cfg.hostname);
     cJSON_AddBoolToObject  (root, "button_sound",     s_cfg.button_sound);
+    cJSON_AddBoolToObject  (root, "audio_enabled",    s_cfg.audio_enabled);
     cJSON_AddNumberToObject(root, "volume",           s_cfg.volume);
     cJSON_AddNumberToObject(root, "led_brightness",   s_cfg.led_brightness);
     cJSON_AddNumberToObject(root, "lcd_brightness",   s_cfg.lcd_brightness);

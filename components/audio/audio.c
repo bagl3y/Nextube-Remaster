@@ -58,8 +58,9 @@ static volatile bool     s_stop_flag   = false;
 static TaskHandle_t      s_audio_task  = NULL;
 static SemaphoreHandle_t s_play_mutex  = NULL;
 
-/* DAC handle - Always On */
-static dac_continuous_handle_t s_dac_cont = NULL;
+/* DAC handle – running when audio is enabled, NULL when disabled / Hi-Z */
+static dac_continuous_handle_t s_dac_cont    = NULL;
+static volatile bool           s_audio_enabled = true;
 
 /* ── Buffer / DMA sizes ─────────────────────────────────────────────── */
 #define FIXED_DAC_RATE     32000
@@ -82,6 +83,64 @@ typedef struct __attribute__((packed)) {
     uint16_t bits_per_sample;   /* 8 or 16            */
 } wav_riff_hdr_t;
 
+
+/* ── DAC lifecycle ──────────────────────────────────────────────────── */
+
+/*
+ * Start (or restart) the continuous DAC from a powered-off / Hi-Z state.
+ *
+ * Called by audio_init() on boot and by audio_set_enabled(true) when the
+ * user re-enables audio from the web UI.  The DMA ring is pre-filled with
+ * flat 128 (VDD/2 = silence) immediately after enable so V_amp_in = VDD/2
+ * from the first sample — no pop, no chirp.
+ */
+static void dac_restart(void)
+{
+    if (s_dac_cont) return;  /* already running */
+
+    dac_continuous_config_t cfg = {
+        .chan_mask = DAC_CHANNEL_MASK_CH0,
+        .desc_num  = DAC_DESC_NUM,
+        .buf_size  = DAC_DMA_BUF_SIZE,
+        .freq_hz   = FIXED_DAC_RATE,
+        .clk_src   = DAC_DIGI_CLK_SRC_DEFAULT,
+        .chan_mode  = DAC_CHANNEL_MODE_SIMUL,
+    };
+    if (dac_continuous_new_channels(&cfg, &s_dac_cont) != ESP_OK) {
+        ESP_LOGE(TAG, "dac_restart: new_channels failed");
+        return;
+    }
+    if (dac_continuous_enable(s_dac_cont) != ESP_OK) {
+        ESP_LOGE(TAG, "dac_restart: enable failed");
+        dac_continuous_del_channels(s_dac_cont);
+        s_dac_cont = NULL;
+        return;
+    }
+
+    /* Anti-Pop Boot Fade: 0 → 128 over 500 ms via cosine S-curve.
+     * Keeps the transition sub-audible on first start.               */
+    size_t fade_samples = (FIXED_DAC_RATE * 500) / 1000;
+    fade_samples = (fade_samples + 3) & ~3;
+    uint8_t *boot_fade = (uint8_t *)calloc(1, fade_samples);
+    if (boot_fade) {
+        for (size_t i = 0; i < fade_samples; i++) {
+            float t = (float)i / (float)fade_samples;
+            boot_fade[i] = (uint8_t)(64.0f * (1.0f - cosf(t * (float)M_PI)));
+        }
+        size_t w;
+        dac_continuous_write(s_dac_cont, boot_fade, fade_samples, &w, portMAX_DELAY);
+        free(boot_fade);
+    }
+
+    /* Pre-fill the ring with silence so the DMA idles at mid-rail. */
+    uint8_t silence[DAC_DMA_BUF_SIZE];
+    memset(silence, 128, sizeof(silence));
+    size_t w;
+    for (int i = 0; i < DAC_DESC_NUM; i++)
+        dac_continuous_write(s_dac_cont, silence, sizeof(silence), &w, portMAX_DELAY);
+
+    ESP_LOGI(TAG, "DAC started (32 kHz continuous)");
+}
 
 /* ── Volume scaling ─────────────────────────────────────────────────── */
 static void apply_volume(uint8_t *buf, int len_bytes,
@@ -295,51 +354,47 @@ task_exit:
 void audio_init(void)
 {
     esp_log_level_set(TAG, ESP_LOG_INFO);
-    ESP_LOGI(TAG, "Audio init – DAC Always-On (32kHz)");
+    ESP_LOGI(TAG, "Audio init – DAC GPIO%d", PIN_AUDIO_DAC);
 
     s_play_mutex = xSemaphoreCreateBinary();
     xSemaphoreGive(s_play_mutex);
 
-    dac_continuous_config_t cfg = {
-        .chan_mask = DAC_CHANNEL_MASK_CH0,
-        .desc_num  = DAC_DESC_NUM,
-        .buf_size  = DAC_DMA_BUF_SIZE,
-        .freq_hz   = FIXED_DAC_RATE,
-        .clk_src   = DAC_DIGI_CLK_SRC_DEFAULT,
-        .chan_mode = DAC_CHANNEL_MODE_SIMUL,
-    };
-    
-    if (dac_continuous_new_channels(&cfg, &s_dac_cont) == ESP_OK) {
-        dac_continuous_enable(s_dac_cont);
-        
-        /* Anti-Pop Boot Fade: Smoothly shift the DC bias from 0V to 1.65V
-         * over 500ms using a sub-audible 1Hz S-Curve. */
-        size_t fade_samples = (FIXED_DAC_RATE * 500) / 1000;
-        fade_samples = (fade_samples + 3) & ~3;
-        
-        uint8_t *boot_fade = (uint8_t *)calloc(1, fade_samples);
-        if (boot_fade) {
-            for (size_t i = 0; i < fade_samples; i++) {
-                float t = (float)i / (float)fade_samples;
-                boot_fade[i] = (uint8_t)(64.0f * (1.0f - cosf(t * (float)M_PI)));
-            }
-            size_t w;
-            dac_continuous_write(s_dac_cont, boot_fade, fade_samples, &w, portMAX_DELAY);
-            free(boot_fade);
+    /* Start the DAC.  audio_set_enabled(false) may tear it back down
+     * immediately after if the saved config has audio disabled. */
+    dac_restart();
+}
+
+void audio_set_enabled(bool enabled)
+{
+    if ((bool)s_audio_enabled == enabled) return;  /* no-op if unchanged */
+    s_audio_enabled = enabled;
+
+    if (!enabled) {
+        /* Stop any active playback task first */
+        s_stop_flag = true;
+        for (int i = 0; i < 30 && s_audio_task != NULL; i++)
+            vTaskDelay(pdMS_TO_TICKS(10));
+
+        /* Tear down DAC → Hi-Z: analog output buffer powered off,
+         * WS2812 rail noise has no coupling path into the amp. */
+        if (s_dac_cont) {
+            dac_continuous_disable(s_dac_cont);
+            dac_continuous_del_channels(s_dac_cont);
+            s_dac_cont = NULL;
         }
-        
-        /* Pre-fill the rest of the DMA ring with silence */
-        uint8_t silence[DAC_DMA_BUF_SIZE];
-        memset(silence, 128, sizeof(silence));
-        size_t w;
-        for (int i = 0; i < DAC_DESC_NUM; i++) {
-            dac_continuous_write(s_dac_cont, silence, sizeof(silence), &w, portMAX_DELAY);
-        }
+        gpio_reset_pin(PIN_AUDIO_DAC);
+        gpio_set_direction(PIN_AUDIO_DAC, GPIO_MODE_INPUT);
+        ESP_LOGI(TAG, "Audio disabled – DAC Hi-Z");
+    } else {
+        /* Re-start the DAC with boot fade so the re-enable is pop-free. */
+        dac_restart();
+        ESP_LOGI(TAG, "Audio enabled");
     }
 }
 
 void audio_play_file(const char *path)
 {
+    if (!s_audio_enabled) return;
     if (!path || path[0] == '\0') return;
 
     const char *ext = strrchr(path, '.');
