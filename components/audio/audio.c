@@ -366,6 +366,7 @@ void audio_init(void)
 
 void audio_set_enabled(bool enabled)
 {
+    ESP_LOGI(TAG, "audio_set_enabled(%d)  current=%d", (int)enabled, (int)s_audio_enabled);
     if ((bool)s_audio_enabled == enabled) return;  /* no-op if unchanged */
     s_audio_enabled = enabled;
 
