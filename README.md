@@ -61,6 +61,39 @@ Reverse-engineered from PCB Rev **1.31** (2022/01/19):
 
 > **Note on GPIO2 (MIDDLE touch):** GPIO2 is a strapping pin with an internal pull-down. It functions correctly as touch pad channel 2 in normal operation but must not be held LOW during boot.
 
+### Audio / DAC Notes
+
+The LTK8002D amplifier is AC-coupled to GPIO25 (DAC Channel 0). Because the
+coupling capacitor blocks DC, the correct 8-bit unsigned PCM silence level is
+**128 (= VDD/2)**. Deviating from this will misalign the capacitor's charge
+and produce a pop on every sound start.
+
+#### Idle noise from WS2812 LEDs
+
+The WS2812B LEDs use an **internal ~400 Hz PWM** to modulate their brightness.
+This creates current pulses on the shared 3.3 V rail at 400 Hz — solidly in
+the audible band — that couple through the DAC output buffer into the amplifier
+input.
+
+**Software mitigations (already implemented):**
+
+| Mitigation | Effect |
+|---|---|
+| DAC Hi-Z when audio disabled (`Audio → Enable audio output` unchecked) | DAC buffer fully powered off; coupling path removed |
+| RMT transmissions paused during playback (`leds_set_audio_active`) | No WS2812 current spikes while a sound is playing |
+| Static-mode change detection | No periodic RMT refresh when LED colour/brightness is unchanged |
+
+**Why increasing PWM frequency does not help:**
+- The WS2812 internal ~400 Hz PWM is inside the chip and cannot be changed in software.
+- The LCD backlight PWM (`display.c`) is already at **50 kHz** — above the audible range.
+- The WS2812 RMT bit clock (`leds.c`) runs at **10 MHz** — this is a fixed protocol requirement, not a noise tone.
+- The interference is broadband current transients, not a single tone; moving the repetition rate higher does not reduce coupled energy.
+
+**Permanent hardware fix:**
+Place a **100 µF + 100 nF** decoupling cap as close as possible to the ESP32
+`VDD3P3_RTC` pin. This absorbs the 400 Hz current spikes at the source before
+they can reach the DAC buffer.
+
 ### Original Firmware Analysis
 
 The stock firmware was built with **ESP-IDF v4.4** + **Arduino framework** via PlatformIO by developer `HERRY0812`. It uses:
